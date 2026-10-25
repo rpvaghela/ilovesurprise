@@ -27,6 +27,8 @@ import {
   Loader2,
 } from 'lucide-react';
 import { adminService } from '../../services/adminService';
+import { cmsService } from '../../services/cmsService';
+import { descriptionHtmlToText, descriptionTextToHtml } from './productDescriptionEditor';
 
 const slugify = (text: string): string => {
   return text
@@ -86,15 +88,17 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
   // Form State
   const [formName, setFormName] = useState('');
   const [formDescription, setFormDescription] = useState('');
+  const [originalDescription, setOriginalDescription] = useState('');
+  const [isDescriptionDirty, setIsDescriptionDirty] = useState(false);
   const [isDescriptionPreview, setIsDescriptionPreview] = useState(false);
-  const [formCategory, setFormCategory] = useState(collections[0]?.name || 'Cash Candles');
+  const [formCategory, setFormCategory] = useState(collections[0]?.slug || '');
   const [formPrice, setFormPrice] = useState('29.99');
   const [formOriginalPrice, setFormOriginalPrice] = useState('');
   const [formSku, setFormSku] = useState('');
   const [formStock, setFormStock] = useState('50');
   const [formLowStockThreshold, setFormLowStockThreshold] = useState('10');
   const [formSurpriseType, setFormSurpriseType] = useState('cash');
-  const [formSurpriseValue, setFormSurpriseValue] = useState('$100 Cash Prize');
+  const [formSurpriseValue, setFormSurpriseValue] = useState('100');
   const [formIsBestSeller, setFormIsBestSeller] = useState(false);
   const [formStatus, setFormStatus] = useState<'active' | 'draft' | 'archived'>('active');
 
@@ -107,10 +111,11 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
   const [formImageAltText, setFormImageAltText] = useState('');
 
   // Images state in modal
-  const [formImages, setFormImages] = useState<string[]>([
-    '/assets/ilovesurprises/categories/Coke_CSH_Sodapop-CND_JC.jpg',
-  ]);
+  const [formImages, setFormImages] = useState<string[]>([]);
   const [newImageUrl, setNewImageUrl] = useState('');
+  const [isUploadingImages, setIsUploadingImages] = useState(false);
+  const [isSavingProduct, setIsSavingProduct] = useState(false);
+  const [formError, setFormError] = useState('');
 
   // Options & Variants state in modal
   const [formOptions, setFormOptions] = useState<AdminProductOption[]>([]);
@@ -189,7 +194,7 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
   const formCategoryOptions: AdminSelectOption[] = useMemo(
     () =>
       collections.map((c) => ({
-        value: c.name,
+        value: c.slug,
         label: c.name,
         badge: c.featured ? 'Featured' : undefined,
       })),
@@ -306,6 +311,7 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
     const textarea = document.getElementById('product-description-editor') as HTMLTextAreaElement | null;
     if (!textarea) {
       setFormDescription((prev) => prev + prefix + suffix);
+      setIsDescriptionDirty(true);
       return;
     }
     const start = textarea.selectionStart;
@@ -314,6 +320,7 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
     const replacement = prefix + (selected || 'sample text') + suffix;
     const newText = formDescription.substring(0, start) + replacement + formDescription.substring(end);
     setFormDescription(newText);
+    setIsDescriptionDirty(true);
     setTimeout(() => {
       textarea.focus();
       textarea.setSelectionRange(start + prefix.length, start + prefix.length + (selected ? selected.length : 11));
@@ -325,18 +332,20 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
     setEditingProductId(null);
     setFormName('');
     setFormDescription('');
+    setOriginalDescription('');
+    setIsDescriptionDirty(false);
     setIsDescriptionPreview(false);
-    setFormCategory(collections[0]?.name || 'Cash Candles');
+    setFormCategory(collections[0]?.slug || '');
     setFormPrice('29.99');
     setFormOriginalPrice('');
     setFormSku(`ILS-${Math.floor(1000 + Math.random() * 9000)}`);
     setFormStock('50');
     setFormLowStockThreshold('10');
     setFormSurpriseType('cash');
-    setFormSurpriseValue('$100 Cash Prize');
+    setFormSurpriseValue('100');
     setFormIsBestSeller(false);
     setFormStatus('active');
-    setFormImages(['/assets/ilovesurprises/categories/Coke_CSH_Sodapop-CND_JC.jpg']);
+    setFormImages([]);
     setFormOptions([]);
     setFormVariants([]);
     setFormSlug('');
@@ -345,6 +354,7 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
     setFormSeoTitle('');
     setFormMetaDescription('');
     setFormImageAltText('');
+    setFormError('');
     setModalTab('general');
     setIsModalOpen(true);
   };
@@ -352,19 +362,25 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
   const handleOpenEdit = (p: AdminProductItem) => {
     setEditingProductId(p.id);
     setFormName(p.name);
-    setFormDescription(p.description || '');
+    setOriginalDescription(p.description || '');
+    setFormDescription(descriptionHtmlToText(p.description || ''));
+    setIsDescriptionDirty(false);
     setIsDescriptionPreview(false);
-    setFormCategory(p.category);
+    setFormCategory(
+      p.collectionSlugs?.[0] ||
+      collections.find((collection) => collection.name.toLowerCase() === p.category.toLowerCase())?.slug ||
+      ''
+    );
     setFormPrice(p.price.toString());
-    setFormOriginalPrice(p.originalPrice ? p.originalPrice.toString() : '');
+    setFormOriginalPrice(p.originalPrice == null ? '' : p.originalPrice.toString());
     setFormSku(p.sku);
     setFormStock(p.stock.toString());
-    setFormLowStockThreshold((p.lowStockThreshold || 10).toString());
+    setFormLowStockThreshold((p.lowStockThreshold ?? 10).toString());
     setFormSurpriseType(p.surpriseType || 'cash');
-    setFormSurpriseValue(p.surpriseValue || '');
+    setFormSurpriseValue(p.surpriseValue == null ? '' : String(p.surpriseValue));
     setFormIsBestSeller(Boolean(p.isBestSeller));
     setFormStatus(p.status || 'active');
-    setFormImages(p.images && p.images.length > 0 ? p.images : [p.image]);
+    setFormImages(p.images && p.images.length > 0 ? p.images : (p.image ? [p.image] : []));
     setFormOptions(p.options || []);
     setFormVariants(p.variants || []);
     setFormSlug(p.slug || slugify(p.name));
@@ -373,6 +389,7 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
     setFormSeoTitle(p.seoTitle || '');
     setFormMetaDescription(p.metaDescription || '');
     setFormImageAltText(p.imageAltText || '');
+    setFormError('');
     setModalTab('general');
     setIsModalOpen(true);
   };
@@ -380,32 +397,29 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 
-  const handleFilesSelected = (files: FileList | File[]) => {
+  const handleFilesSelected = async (files: FileList | File[]) => {
     const fileArray = Array.from(files).filter((file) => file.type.startsWith('image/'));
     if (fileArray.length === 0) {
       onShowToast('Please select valid image files (JPG, PNG, WEBP)', { type: 'info' });
       return;
     }
 
-    let loadedCount = 0;
-    const newPreviews: string[] = [];
-
-    fileArray.forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        if (typeof e.target?.result === 'string') {
-          newPreviews.push(e.target.result);
-        }
-        loadedCount += 1;
-        if (loadedCount === fileArray.length) {
-          setFormImages((prev) => [...prev, ...newPreviews]);
-          onShowToast(`Added ${newPreviews.length} image${newPreviews.length > 1 ? 's' : ''} to preview (ready for future storage upload)`, {
-            type: 'success',
-          });
-        }
-      };
-      reader.readAsDataURL(file);
-    });
+    setIsUploadingImages(true);
+    setFormError('');
+    try {
+      const uploads = await Promise.all(fileArray.map((file) => cmsService.uploadImage(file)));
+      const uploadedUrls = uploads.map((upload) => upload.absoluteUrl || upload.url);
+      setFormImages((prev) => [...prev, ...uploadedUrls]);
+      onShowToast(`Uploaded ${uploadedUrls.length} product image${uploadedUrls.length === 1 ? '' : 's'}`, {
+        type: 'success',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Product images could not be uploaded.';
+      setFormError(message);
+      onShowToast(message, { type: 'info' });
+    } finally {
+      setIsUploadingImages(false);
+    }
   };
 
   const handleMoveImage = (fromIndex: number, toIndex: number) => {
@@ -486,8 +500,46 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
 
   const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
+    setFormError('');
     if (!formName.trim()) {
-      onShowToast('Product title is required', { type: 'info' });
+      setFormError('Product title is required.');
+      return;
+    }
+
+    const price = Number(formPrice);
+    const compareAtPrice = formOriginalPrice.trim() ? Number(formOriginalPrice) : null;
+    const stock = Number(formStock);
+    const lowStockThreshold = Number(formLowStockThreshold);
+    const surpriseValue = formSurpriseValue.trim() ? Number(formSurpriseValue) : null;
+
+    if (!Number.isFinite(price) || price <= 0) {
+      setFormError('Enter a product price greater than zero.');
+      setModalTab('pricing');
+      return;
+    }
+    if (compareAtPrice !== null && (!Number.isFinite(compareAtPrice) || compareAtPrice <= 0)) {
+      setFormError('Compare-at price must be greater than zero or left blank.');
+      setModalTab('pricing');
+      return;
+    }
+    if (!Number.isInteger(stock) || stock < 0) {
+      setFormError('Stock quantity must be a whole number of zero or more.');
+      setModalTab('pricing');
+      return;
+    }
+    if (!Number.isInteger(lowStockThreshold) || lowStockThreshold < 0) {
+      setFormError('Low stock threshold must be a whole number of zero or more.');
+      setModalTab('pricing');
+      return;
+    }
+    if (surpriseValue !== null && (!Number.isFinite(surpriseValue) || surpriseValue < 0)) {
+      setFormError('Surprise value must be a number of zero or more, or left blank.');
+      setModalTab('general');
+      return;
+    }
+    if (formImages.length === 0) {
+      setFormError('Add at least one product image.');
+      setModalTab('images');
       return;
     }
 
@@ -496,36 +548,49 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
       .map((t) => t.trim())
       .filter(Boolean);
 
+    const selectedCollection = collections.find((collection) => collection.slug === formCategory);
     const payload: Partial<AdminProductItem> = {
       name: formName.trim(),
-      category: formCategory,
-      price: parseFloat(formPrice) || 29.99,
-      originalPrice: formOriginalPrice ? parseFloat(formOriginalPrice) : undefined,
-      description: formDescription.trim() || undefined,
-      sku: formSku.trim() || `ILS-${Date.now().toString().slice(-4)}`,
-      stock: parseInt(formStock, 10) || 0,
-      lowStockThreshold: parseInt(formLowStockThreshold, 10) || 10,
+      category: selectedCollection?.name || '',
+      price,
+      originalPrice: compareAtPrice,
+      description: isDescriptionDirty ? descriptionTextToHtml(formDescription) : originalDescription,
+      sku: formSku.trim(),
+      stock,
+      lowStockThreshold,
       surpriseType: formSurpriseType,
-      surpriseValue: formSurpriseValue.trim(),
-      image: formImages[0] || '/assets/ilovesurprises/categories/Coke_CSH_Sodapop-CND_JC.jpg',
+      surpriseValue,
+      image: formImages[0],
       images: formImages,
       options: formOptions,
       variants: formVariants,
       isBestSeller: formIsBestSeller,
       status: formStatus,
       slug: formSlug.trim() || slugify(formName) || undefined,
+      collectionSlugs: formCategory ? [formCategory] : [],
       tags: parsedTags.length > 0 ? parsedTags : undefined,
       seoTitle: formSeoTitle.trim() || undefined,
       metaDescription: formMetaDescription.trim() || undefined,
       imageAltText: formImageAltText.trim() || undefined,
     };
 
-    if (editingProductId) {
-      if (onEditProduct) await onEditProduct(editingProductId, payload);
-    } else {
-      if (onAddProduct) await onAddProduct(payload);
+    setIsSavingProduct(true);
+    try {
+      if (editingProductId) {
+        if (!onEditProduct) throw new Error('Product editing is unavailable.');
+        await onEditProduct(editingProductId, payload);
+      } else {
+        if (!onAddProduct) throw new Error('Product creation is unavailable.');
+        await onAddProduct(payload);
+      }
+      setIsModalOpen(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Product could not be saved.';
+      setFormError(message);
+      onShowToast(message, { type: 'info' });
+    } finally {
+      setIsSavingProduct(false);
     }
-    setIsModalOpen(false);
   };
 
   const handleConfirmDelete = async () => {
@@ -1180,12 +1245,9 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
                           <div
                             className="prose prose-xs max-w-none [&_h3]:font-bold [&_h3]:text-sm [&_ul]:list-disc [&_ul]:pl-4"
                             dangerouslySetInnerHTML={{
-                              __html: formDescription
-                                .replace(/### (.*)/g, '<h3 class="font-bold text-sm my-1">$1</h3>')
-                                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                                .replace(/\*(.*?)\*/g, '<em>$1</em>')
-                                .replace(/• (.*)/g, '<li>$1</li>')
-                                .replace(/\n/g, '<br/>'),
+                              __html: isDescriptionDirty
+                                ? descriptionTextToHtml(formDescription)
+                                : originalDescription,
                             }}
                           />
                         ) : (
@@ -1197,11 +1259,17 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
                         id="product-description-editor"
                         rows={3}
                         value={formDescription}
-                        onChange={(e) => setFormDescription(e.target.value)}
+                        onChange={(e) => {
+                          setFormDescription(e.target.value);
+                          setIsDescriptionDirty(true);
+                        }}
                         placeholder="Enter aromatic notes, soy wax details, reveal prize descriptions, or use toolbar buttons above for rich-text styling..."
                         className="w-full p-3 rounded-xl bg-[#faf7f9] border border-[#eedbe6] text-xs text-[#141219] focus:outline-none focus:border-[#D30915]"
                       />
                     )}
+                    <p className="mt-1 text-[11px] text-[#716d77]">
+                      Saved HTML is shown as readable text. Existing formatting is kept unless you edit the description.
+                    </p>
                   </div>
 
                   {/* Product Tags */}
@@ -1246,12 +1314,14 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
                     </div>
 
                     <div>
-                      <label className="block text-xs font-bold text-[#141219] mb-1">Surprise Reveal Value Description</label>
+                      <label className="block text-xs font-bold text-[#141219] mb-1">Surprise Value ($)</label>
                       <input
-                        type="text"
+                        type="number"
+                        min="0"
+                        step="0.01"
                         value={formSurpriseValue}
                         onChange={(e) => setFormSurpriseValue(e.target.value)}
-                        placeholder="e.g. $10 to $5,000 Ring Prize Inside"
+                        placeholder="e.g. 100"
                         className="w-full h-10 px-3 rounded-xl bg-[#faf7f9] border border-[#eedbe6] text-xs text-[#141219] focus:outline-none focus:border-[#D30915]"
                       />
                     </div>
@@ -1443,7 +1513,9 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
                       <span className="text-[#D30915] hover:underline">Click to browse</span> or drag and drop product photos
                     </div>
                     <p className="text-[11px] text-[#716d77] m-0 mt-1">
-                      Supports multiple image files (JPG, PNG, WEBP) • Stored in local preview state
+                      {isUploadingImages
+                        ? 'Uploading images to the product media library...'
+                        : 'JPG, PNG, WebP, GIF, or SVG. Maximum 10 MB per image.'}
                     </p>
                   </div>
 
@@ -1669,20 +1741,35 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
               )}
 
               {/* Modal Footer */}
+              {formError && (
+                <div
+                  role="alert"
+                  className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-800"
+                >
+                  {formError}
+                </div>
+              )}
               <div className="pt-4 border-t border-[#eedbe6] flex items-center justify-end gap-2">
                 <button
                   id="admin-cancel-product-btn"
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 rounded-xl border border-[#eedbe6] text-xs font-bold text-[#716d77] hover:bg-gray-100 cursor-pointer"
+                  disabled={isSavingProduct || isUploadingImages}
+                  className="px-4 py-2 rounded-xl border border-[#eedbe6] text-xs font-bold text-[#716d77] hover:bg-gray-100 disabled:opacity-50 cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-[#D30915] hover:bg-[#B60711] text-white text-xs font-black uppercase tracking-wider transition-all shadow-sm cursor-pointer"
+                  disabled={isSavingProduct || isUploadingImages}
+                  className="px-5 py-2 rounded-xl bg-[#D30915] hover:bg-[#B60711] text-white text-xs font-black uppercase tracking-wider transition-all shadow-sm disabled:opacity-60 cursor-pointer"
                 >
-                  {editingProductId ? 'Save Changes' : 'Create Product'}
+                  {isSavingProduct ? (
+                    <span className="inline-flex items-center gap-2">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Saving
+                    </span>
+                  ) : editingProductId ? 'Save Changes' : 'Create Product'}
                 </button>
               </div>
             </form>

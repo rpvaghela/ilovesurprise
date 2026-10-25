@@ -1,4 +1,4 @@
-import type { UserProfile, Order, Review } from '../types';
+import type { UserProfile, Order } from '../types';
 import type { JewelryAppraisal } from '../types/appraisal';
 import type { AffiliateStats, CommissionRecord, PayoutRecord, ReferralMember } from '../types/affiliate';
 import { productsData } from './products';
@@ -282,8 +282,8 @@ export const MOCK_ORDERS: Order[] = [
           price: 44.99,
           image: '/assets/ilovesurprises/categories/cash_candles.jpg',
           surpriseType: 'cash',
-          rating: 5.0,
-          reviewCount: 38,
+          rating: 0,
+          reviewCount: 0,
           inStock: true,
         },
         quantity: 2,
@@ -300,8 +300,8 @@ export const MOCK_ORDERS: Order[] = [
           price: 44.99,
           image: '/assets/ilovesurprises/categories/1_Mockup_Jewelry_JewelryCandles_93d459aa-d530-474d-ba4c-32fb9af4f94c.jpg',
           surpriseType: 'jewelry',
-          rating: 4.9,
-          reviewCount: 52,
+          rating: 0,
+          reviewCount: 0,
           inStock: true,
         },
         quantity: 1,
@@ -366,8 +366,8 @@ export const MOCK_ORDERS: Order[] = [
           price: 24.99,
           image: '/assets/ilovesurprises/products/Gummy-Bear_Figurines_JWL_wax_melts.jpg',
           surpriseType: 'jewelry',
-          rating: 4.8,
-          reviewCount: 19,
+          rating: 0,
+          reviewCount: 0,
           inStock: true,
         },
         quantity: 1,
@@ -583,44 +583,5 @@ export const MOCK_NOTIFICATIONS = [
     message: 'Explore our latest 2026 zodiac reveal collection with real cash inside.',
     isRead: true,
     createdAt: '2026-04-01T10:00:00.000Z',
-  },
-];
-
-export const MOCK_REVIEWS: Review[] = [
-  {
-    id: 'rev-1',
-    author: 'Brittany M.',
-    location: 'Dallas, TX',
-    rating: 5,
-    date: '2026-03-10',
-    title: 'I WON $100 CASH IN MY CANDLE!! 🔥',
-    comment: 'I was totally skeptical at first, but when the wax burned down about 20 hours in, I saw the gold foil capsule! Unwrapped it and there was a crisp $100 bill inside! Plus the vanilla scent is incredible.',
-    verified: true,
-    productName: 'Vanilla Cash Surprise Candle',
-    revealedSurprise: '$100 Real Cash Bill',
-  },
-  {
-    id: 'rev-2',
-    author: 'Kelsey R.',
-    location: 'Nashville, TN',
-    rating: 5,
-    date: '2026-03-14',
-    title: 'Stunning diamond ring worth $680!',
-    comment: 'Got my ring code and entered it into the appraisal tool—it came back as a genuine lab diamond halo ring valued at $680! The quality is top notch and fits perfectly.',
-    verified: true,
-    productName: 'Rose & Champagne Jewelry Candle',
-    revealedSurprise: 'Lab Diamond Halo Ring ($680 Value)',
-  },
-  {
-    id: 'rev-3',
-    author: 'Marcus L.',
-    location: 'Denver, CO',
-    rating: 5,
-    date: '2026-03-22',
-    title: 'Best gift ever for my wife',
-    comment: 'Ordered this for my wife’s birthday. She spent the whole evening burning it and watching the foil pouch emerge. She got a gorgeous sterling silver necklace. 10/10 gift.',
-    verified: true,
-    productName: '50 and Fabulous Birthday Candle',
-    revealedSurprise: 'Sterling Silver Heart Pendant',
   },
 ];

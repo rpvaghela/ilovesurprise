@@ -1,112 +1,87 @@
 import type { Review } from '../types';
-import { MOCK_REVIEWS } from '../data/mockData';
 import { apiClient, type ApiResponse } from './apiClient';
 
-const REVIEWS_STORAGE_KEY = 'ils_reviews_v1';
+interface ApiReview {
+  id: string;
+  productId: string;
+  author: string;
+  rating: number;
+  date: string;
+  title: string;
+  comment: string;
+  verified: boolean;
+  productName: string;
+}
+
+interface ReviewListResponse {
+  reviews: ApiReview[];
+}
+
+function toReview(review: ApiReview): Review {
+  return {
+    ...review,
+    date: review.date.slice(0, 10),
+  };
+}
+
+function reviewStats(reviews: Review[]) {
+  const breakdown: Record<number, number> = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
+  reviews.forEach((review) => {
+    const rating = Math.min(5, Math.max(1, Math.round(review.rating)));
+    breakdown[rating] += 1;
+  });
+
+  return {
+    averageRating: reviews.length
+      ? Number((reviews.reduce((total, review) => total + review.rating, 0) / reviews.length).toFixed(1))
+      : 0,
+    totalReviews: reviews.length,
+    breakdown,
+  };
+}
+
+async function fetchReviews(endpoint: string): Promise<Review[]> {
+  const response = await apiClient.get<ApiResponse<ReviewListResponse>>(endpoint);
+  const reviews = response.data?.reviews;
+  if (!Array.isArray(reviews)) {
+    throw new Error('The reviews service returned an invalid response.');
+  }
+  return reviews.map(toReview);
+}
 
 export const reviewService = {
-  /**
-   * Retrieves product reviews from local storage / mock data.
-   */
-  async getProductReviews(_productId: string): Promise<{
+  async getProductReviews(productId: string): Promise<{
     reviews: Review[];
     stats: { averageRating: number; totalReviews: number; breakdown: Record<number, number> };
   }> {
-    let reviews: Review[] = MOCK_REVIEWS;
-
-    if (typeof window !== 'undefined') {
-      try {
-        const stored = localStorage.getItem(REVIEWS_STORAGE_KEY);
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            reviews = parsed;
-          }
-        } else {
-          localStorage.setItem(REVIEWS_STORAGE_KEY, JSON.stringify(MOCK_REVIEWS));
-        }
-      } catch {
-        // use fallback mock
-      }
-    }
-
-    const totalReviews = reviews.length;
-    const avg = totalReviews > 0
-      ? Number((reviews.reduce((acc, r) => acc + (r.rating || 5), 0) / totalReviews).toFixed(1))
-      : 5.0;
-
-    const breakdown: Record<number, number> = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
-    reviews.forEach((r) => {
-      const star = Math.min(5, Math.max(1, Math.round(r.rating || 5)));
-      breakdown[star] = (breakdown[star] || 0) + 1;
-    });
-
-    return {
-      reviews,
-      stats: {
-        averageRating: avg,
-        totalReviews,
-        breakdown,
-      },
-    };
+    const reviews = await fetchReviews(
+      `/api/products/${encodeURIComponent(productId)}/reviews`
+    );
+    return { reviews, stats: reviewStats(reviews) };
   },
 
-  /**
-   * Creates and stores a new customer product review.
-   * Sends review to backend POST /api/products/:id/reviews with local persistence fallback.
-   */
+  async getRecentReviews(limit = 12): Promise<Review[]> {
+    return fetchReviews(`/api/products/reviews?limit=${encodeURIComponent(String(limit))}`);
+  },
+
   async createReview(data: {
     productId: string;
     rating: number;
     title: string;
     comment: string;
-    customerName: string;
-    surpriseType?: string;
-    revealedItem?: string;
   }): Promise<Review> {
-    let backendReviewId: string | null = null;
-    try {
-      const response = await apiClient.post<ApiResponse<any>>(
-        `/api/products/${encodeURIComponent(data.productId)}/reviews`,
-        {
-          rating: data.rating,
-          title: data.title,
-          comment: data.comment,
-        }
-      );
-      const resData = response?.data || (response as any);
-      if (resData?.id) {
-        backendReviewId = resData.id;
+    const response = await apiClient.post<ApiResponse<{ review: ApiReview }>>(
+      `/api/products/${encodeURIComponent(data.productId)}/reviews`,
+      {
+        rating: data.rating,
+        title: data.title,
+        comment: data.comment,
       }
-    } catch (err) {
-      console.warn('Backend review submission failed, falling back to local storage:', err);
+    );
+    const review = response.data?.review;
+    if (!review) {
+      throw new Error('The review could not be saved. Please try again.');
     }
-
-    const newReview: Review = {
-      id: backendReviewId || `rev-${Date.now()}`,
-      productId: data.productId,
-      author: data.customerName || 'Verified Customer',
-      rating: data.rating,
-      date: new Date().toISOString().split('T')[0],
-      title: data.title,
-      comment: data.comment,
-      verified: true,
-      productName: data.revealedItem || 'Surprise Reveal',
-      revealedSurprise: data.revealedItem,
-    };
-
-    if (typeof window !== 'undefined') {
-      try {
-        const stored = localStorage.getItem(REVIEWS_STORAGE_KEY);
-        const existing: Review[] = stored ? JSON.parse(stored) : MOCK_REVIEWS;
-        const updated = [newReview, ...existing];
-        localStorage.setItem(REVIEWS_STORAGE_KEY, JSON.stringify(updated));
-      } catch {
-        // ignore
-      }
-    }
-
-    return newReview;
+    return toReview(review);
   },
 };
-

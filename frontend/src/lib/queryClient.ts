@@ -7,7 +7,7 @@ import type { Product } from '../types';
  * Cache persistence key. Bumped from V2 because the persisted scope changed:
  * only public catalogue data is written to storage now.
  */
-const STORAGE_KEY = 'ILOVESURPRISES_QUERY_CACHE_V3';
+const STORAGE_KEY = 'ILOVESURPRISES_QUERY_CACHE_V5';
 const ONE_MINUTE_MS = 60 * 1000;
 const ONE_HOUR_MS = 60 * ONE_MINUTE_MS;
 const ONE_DAY_MS = 24 * ONE_HOUR_MS;
@@ -105,7 +105,7 @@ if (typeof window !== 'undefined') {
       queryClient,
       persister,
       maxAge: ONE_DAY_MS,
-      buster: 'v3.0',
+      buster: 'v4.0',
       dehydrateOptions: {
         shouldDehydrateQuery: (query) =>
           query.state.status === 'success' && isPersistableQueryKey(query.queryKey),
@@ -115,6 +115,7 @@ if (typeof window !== 'undefined') {
     // Remove legacy caches that might take up storage
     try {
       window.localStorage.removeItem('ILOVESURPRISES_QUERY_CACHE_V2');
+      window.localStorage.removeItem('ILOVESURPRISES_QUERY_CACHE_V3');
       window.localStorage.removeItem('ILOVESURPRISES_QUERY_CACHE');
     } catch {
       // Storage unavailable

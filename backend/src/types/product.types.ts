@@ -112,15 +112,15 @@ export interface CreateProductDTO {
   shortDescription?: string;
   description?: string;
   price: number;
-  compareAtPrice?: number;
-  imageUrl?: string;
-  categoryId?: string;
-  surpriseType?: string;
-  surpriseValue?: number;
-  badge?: string;
+  compareAtPrice?: number | null;
+  imageUrl?: string | null;
+  categoryId?: string | null;
+  surpriseType?: string | null;
+  surpriseValue?: number | null;
+  badge?: string | null;
   stock?: number;
   lowStockThreshold?: number;
-  sku?: string;
+  sku?: string | null;
   isBestSeller?: boolean;
   isNew?: boolean;
   scentNotes?: string[];
@@ -128,6 +128,8 @@ export interface CreateProductDTO {
   jewelryTypes?: string[];
   status?: ProductStatus;
   images?: string[];
+  collectionSlug?: string | null;
+  options?: Array<{ name: string; values: string[] }>;
 }
 
 export interface UpdateProductDTO extends Partial<CreateProductDTO> {}

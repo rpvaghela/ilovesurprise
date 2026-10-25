@@ -110,6 +110,8 @@ export interface BackendProduct {
   status: string;
   surpriseType?: string | null;
   surpriseValue?: number | string | null;
+  collections?: Array<{ id: string; name: string; slug: string }>;
+  options?: Array<{ id?: string; name: string; position: number; values: string[] }>;
 }
 
 export interface BackendProductListPayload {
@@ -235,6 +237,9 @@ export function mapBackendProductToAdmin(p: BackendProduct): AdminProductItem {
     status: toUiProductStatus(p.status),
     isBestSeller: Boolean(p.isBestSeller),
     slug: p.slug || (p.name ? p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') : undefined),
+    categoryId: p.categoryId,
+    collectionSlugs: p.collections?.map((collection) => collection.slug) || [],
+    options: p.options?.map((option) => ({ name: option.name, values: option.values })) || [],
   };
 }
 
@@ -1920,7 +1925,7 @@ export const adminService = {
       body.lowStockThreshold = Number(updates.lowStockThreshold);
     }
     if (updates.description !== undefined) body.description = updates.description;
-    if (updates.sku !== undefined) body.sku = updates.sku;
+    if (updates.sku !== undefined) body.sku = updates.sku.trim() || null;
     if (updates.status !== undefined) body.status = toBackendProductStatus(updates.status);
     if (updates.isBestSeller !== undefined) body.isBestSeller = Boolean(updates.isBestSeller);
     if (updates.originalPrice !== undefined) {
@@ -1928,8 +1933,17 @@ export const adminService = {
         ? Number(updates.originalPrice)
         : null;
     }
-    if (updates.surpriseType !== undefined) body.surpriseType = updates.surpriseType;
+    if (updates.surpriseType !== undefined) body.surpriseType = updates.surpriseType || null;
+    if (updates.surpriseValue !== undefined) {
+      body.surpriseValue = updates.surpriseValue === null || updates.surpriseValue === ''
+        ? null
+        : Number(updates.surpriseValue);
+    }
     if (updates.slug !== undefined) body.slug = updates.slug.trim();
+    if (updates.collectionSlugs !== undefined) {
+      body.collectionSlug = updates.collectionSlugs[0] || null;
+    }
+    if (updates.options !== undefined) body.options = updates.options;
 
     if (updates.image !== undefined) {
       const imageUrl = toAbsoluteImageUrl(updates.image);

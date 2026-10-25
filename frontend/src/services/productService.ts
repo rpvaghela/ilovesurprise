@@ -27,8 +27,8 @@ const QUERY_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes fresh
 /**
  * Multi-layer storage cache helpers for instant (< 5ms) restores on page reload, navigation, and browser restarts.
  */
-const SESSION_CACHE_PREFIX = 'ils_prod_qcache_v7_';
-const LOCAL_STORAGE_PREFIX = 'ils_prod_store_v7_';
+const SESSION_CACHE_PREFIX = 'ils_prod_qcache_v8_';
+const LOCAL_STORAGE_PREFIX = 'ils_prod_store_v8_';
 const SOAP_CATALOG_PRODUCTS = productsData.filter(
   (product) => product.category?.trim().toLowerCase() === 'soaps'
 );
@@ -926,7 +926,7 @@ export function mapRowToProduct(row: any): Product {
     originalPrice,
     surpriseType,
     surpriseValue,
-    rating: Number(row.rating) || 4.8,
+    rating: Number(row.reviewCount ?? row.review_count ?? 0) > 0 ? Number(row.rating) || 0 : 0,
     reviewCount: Number(row.reviewCount ?? row.review_count ?? 0),
     image: resolvedImage,
     images: allImages,
@@ -1073,7 +1073,7 @@ export const productService = {
         title: category?.name || meta.name,
         bodyHtml: category?.description || meta.description,
         productsCount: total,
-        imageUrl: category?.image || meta.imageUrl,
+        imageUrl: meta.imageUrl || category?.image,
       },
       products,
       total,
@@ -1572,10 +1572,9 @@ export const productService = {
           c.name.toLowerCase() === clean
       );
       const fallbackImg =
-        category?.image ||
         approvedMeta.imageUrl ||
+        category?.image ||
         SIGNATURE_COLLECTION_IMAGES[approvedMeta.canonicalHandle] ||
-        SIGNATURE_COLLECTION_IMAGES['cash-candles'] ||
         '/assets/ilovesurprises/categories/1_Mockup_Jewelry_JewelryCandles_93d459aa-d530-474d-ba4c-32fb9af4f94c.jpg';
 
       return {
@@ -1598,7 +1597,6 @@ export const productService = {
       'bath-bombs': 'bath-bombs',
       'soaps': 'soap',
       'soap': 'soap',
-      'jewelry': 'jewelry-candles',
       'candy': 'cash-candy',
       'chocolates': 'cash-chocolates',
       'ring-candles': 'jewelry-candles',
@@ -1622,7 +1620,6 @@ export const productService = {
       'jewelry-candle': 'jewelry-candles',
       'jewelry-candles': 'jewelry-candles',
       'jewelry-candles-1': 'jewelry-candles',
-      'jewellery': 'jewelry',
       'jewellery-candle': 'jewelry-candles',
       'jewellery-candles': 'jewelry-candles',
       'funny-cash-candles': 'funny-candle',
@@ -1683,10 +1680,9 @@ export const productService = {
           c.name.toLowerCase() === clean
       );
       const fallbackImg =
-        category?.image ||
         targetApprovedMeta.imageUrl ||
+        category?.image ||
         SIGNATURE_COLLECTION_IMAGES[targetApprovedMeta.canonicalHandle] ||
-        SIGNATURE_COLLECTION_IMAGES['cash-candles'] ||
         '/assets/ilovesurprises/categories/1_Mockup_Jewelry_JewelryCandles_93d459aa-d530-474d-ba4c-32fb9af4f94c.jpg';
 
       return {
@@ -2208,8 +2204,8 @@ export const productService = {
       // Only return synchronous cache hit if ALL products on the requested page are genuinely cached
       if (cachedProds.length === pageHandles.length && pageHandles.length > 0) {
         const fallbackImg =
-          category?.image ||
           approvedMeta.imageUrl ||
+          category?.image ||
           SIGNATURE_COLLECTION_IMAGES[approvedMeta.canonicalHandle] ||
           '/assets/ilovesurprises/categories/1_Mockup_Jewelry_JewelryCandles_93d459aa-d530-474d-ba4c-32fb9af4f94c.jpg';
 

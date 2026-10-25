@@ -30,14 +30,39 @@ export const getProduct = async (req: Request, res: Response, next: NextFunction
 
 export const createReview = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
+    if (!req.user) {
+      res.status(401).json({ status: 'error', message: 'Sign in to submit a product review.' });
+      return;
+    }
     const productId = String(req.params.id);
-    const userId = req.user ? req.user.id : 'guest-user';
-    const review = await productService.createReview(productId, userId, req.body);
+    const review = await productService.createReview(productId, req.user.id, req.body);
     res.status(201).json({
       status: 'success',
       message: 'Review submitted successfully',
       data: { review },
     });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getProductReviews = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const reviews = await productService.getProductReviews(String(req.params.id));
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=120');
+    res.status(200).json({ status: 'success', data: { reviews } });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getRecentReviews = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const requestedLimit = Number(req.query.limit) || 12;
+    const limit = Math.min(24, Math.max(1, requestedLimit));
+    const reviews = await productService.getRecentReviews(limit);
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=120');
+    res.status(200).json({ status: 'success', data: { reviews } });
   } catch (error) {
     next(error);
   }
@@ -68,5 +93,7 @@ export const productController = {
   listProducts,
   getProduct,
   getProductsBatch,
+  getProductReviews,
+  getRecentReviews,
   createReview,
 };

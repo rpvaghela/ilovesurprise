@@ -124,7 +124,7 @@ export const AdminCommerce: React.FC<AdminCommerceProps> = ({
   const [prodFormOriginalPrice, setProdFormOriginalPrice] = useState('39.99');
   const [prodFormStock, setProdFormStock] = useState('50');
   const [prodFormSurpriseType, setProdFormSurpriseType] = useState('cash');
-  const [prodFormSurpriseValue, setProdFormSurpriseValue] = useState('$100 Cash Prize');
+  const [prodFormSurpriseValue, setProdFormSurpriseValue] = useState('100');
   const [prodFormImage, setProdFormImage] = useState('/assets/ilovesurprises/categories/Coke_CSH_Sodapop-CND_JC.jpg');
   const [prodFormIsBestSeller, setProdFormIsBestSeller] = useState(false);
   const [prodFormStatus, setProdFormStatus] = useState<'active' | 'draft'>('active');
@@ -174,7 +174,7 @@ export const AdminCommerce: React.FC<AdminCommerceProps> = ({
     setProdFormOriginalPrice('');
     setProdFormStock('50');
     setProdFormSurpriseType('cash');
-    setProdFormSurpriseValue('$100 Cash Prize');
+    setProdFormSurpriseValue('100');
     setProdFormImage('/assets/ilovesurprises/categories/Coke_CSH_Sodapop-CND_JC.jpg');
     setProdFormIsBestSeller(false);
     setProdFormStatus('active');
@@ -192,7 +192,7 @@ export const AdminCommerce: React.FC<AdminCommerceProps> = ({
     setProdFormOriginalPrice(p.originalPrice ? p.originalPrice.toString() : '');
     setProdFormStock(p.stock.toString());
     setProdFormSurpriseType(p.surpriseType);
-    setProdFormSurpriseValue(p.surpriseValue || '');
+    setProdFormSurpriseValue(p.surpriseValue == null ? '' : String(p.surpriseValue));
     setProdFormImage(p.image);
     setProdFormIsBestSeller(Boolean(p.isBestSeller));
     setProdFormStatus(p.status === 'active' ? 'active' : 'draft');
@@ -214,7 +214,7 @@ export const AdminCommerce: React.FC<AdminCommerceProps> = ({
       description: prodFormDescription.trim() || undefined,
       stock: parseInt(prodFormStock, 10) || 0,
       surpriseType: prodFormSurpriseType,
-      surpriseValue: prodFormSurpriseValue.trim(),
+      surpriseValue: prodFormSurpriseValue.trim() ? Number(prodFormSurpriseValue) : null,
       image: prodFormImage.trim() || '/assets/ilovesurprises/categories/Coke_CSH_Sodapop-CND_JC.jpg',
       isBestSeller: prodFormIsBestSeller,
       status: prodFormStatus,
@@ -1590,10 +1590,12 @@ export const AdminCommerce: React.FC<AdminCommerceProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-[#141219] mb-1">Surprise Tag Value</label>
+                  <label className="block font-bold text-[#141219] mb-1">Surprise Value ($)</label>
                   <input
-                    type="text"
-                    placeholder="e.g. $100 Cash Prize"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="e.g. 100"
                     value={prodFormSurpriseValue}
                     onChange={(e) => setProdFormSurpriseValue(e.target.value)}
                     className="w-full h-9 px-3 rounded-xl bg-[#faf7f9] border border-[#eedbe6] focus:outline-none focus:border-[#D30915]"

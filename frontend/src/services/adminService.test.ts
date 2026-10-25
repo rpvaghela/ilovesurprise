@@ -132,6 +132,16 @@ describe('adminService', () => {
         mapBackendProductToAdmin(backendProduct({ status: 'ARCHIVED' })).status
       ).toBe('archived');
     });
+
+    it('maps editable collection and option data from the backend', () => {
+      const item = mapBackendProductToAdmin(backendProduct({
+        collections: [{ id: 'collection-1', name: 'Cash Candles', slug: 'cash-candles' }],
+        options: [{ name: 'Scent', position: 1, values: ['Vanilla', 'Citrus'] }],
+      }));
+
+      expect(item.collectionSlugs).toEqual(['cash-candles']);
+      expect(item.options).toEqual([{ name: 'Scent', values: ['Vanilla', 'Citrus'] }]);
+    });
   });
 
   describe('product CRUD', () => {
@@ -198,6 +208,53 @@ describe('adminService', () => {
       ).rejects.toMatchObject({ kind: 'forbidden' });
 
       expect(localStorage.getItem('ils_admin_products_override_v1')).toBeNull();
+    });
+
+    it('sends all editable product fields using the backend data shape', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({ status: 'success', data: { product: backendProduct() } })
+      );
+
+      await adminService.updateProduct('prod_1', {
+        name: 'Updated Candle',
+        price: 44.5,
+        originalPrice: null,
+        description: '',
+        sku: '',
+        stock: 0,
+        lowStockThreshold: 3,
+        surpriseType: 'cash',
+        surpriseValue: 125,
+        isBestSeller: true,
+        status: 'draft',
+        slug: 'updated-candle',
+        image: 'https://cdn.example.com/updated.jpg',
+        images: ['https://cdn.example.com/updated.jpg', 'https://cdn.example.com/second.jpg'],
+        collectionSlugs: ['cash-candles'],
+        options: [{ name: 'Scent', values: ['Vanilla', 'Citrus'] }],
+      });
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(String(url)).toContain('/api/admin/products/prod_1');
+      expect(init.method).toBe('PATCH');
+      expect(JSON.parse(init.body)).toEqual({
+        name: 'Updated Candle',
+        price: 44.5,
+        stock: 0,
+        lowStockThreshold: 3,
+        description: '',
+        sku: null,
+        status: 'DRAFT',
+        isBestSeller: true,
+        compareAtPrice: null,
+        surpriseType: 'cash',
+        surpriseValue: 125,
+        slug: 'updated-candle',
+        collectionSlug: 'cash-candles',
+        options: [{ name: 'Scent', values: ['Vanilla', 'Citrus'] }],
+        imageUrl: 'https://cdn.example.com/updated.jpg',
+        images: ['https://cdn.example.com/updated.jpg', 'https://cdn.example.com/second.jpg'],
+      });
     });
 
     it('rejects a relative image path with an actionable message', async () => {
@@ -1339,5 +1396,4 @@ describe('adminService VIP memberships & jewelry appraisals', () => {
     });
   });
 });
-
 

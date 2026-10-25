@@ -1,6 +1,7 @@
 import { reviewService } from '../services/reviewService';
 import { productService } from '../services/productService';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ArrowLeft,
   Star,
@@ -24,7 +25,6 @@ import {
 import { ProductGallery } from '../components/products/ProductGallery';
 import { ProductCard } from '../components/products/ProductCard';
 import { RingSizerModal } from '../components/products/RingSizerModal';
-import { reviewsData } from '../data/reviews';
 import type { Product, CartItem, Review } from '../types';
 import { useRelatedProducts } from '../hooks/useProducts';
 import { representativeService, type PublicRepresentative } from '../services/representativeService';
@@ -55,7 +55,6 @@ interface ProductDetailsProps {
   onShowToast?: (message: string, options?: { title?: string; type?: 'success' | 'info' }) => void;
 }
 
-const LOCAL_REVIEWS_KEY = 'ilovesurprises_user_reviews_v1';
 export const RING_SIZES = [5, 6, 7, 8, 9, 10, 11];
 export const JEWELRY_TYPES = ['Ring', 'Necklace', 'Earrings', 'Bracelet', 'Surprise Me'];
 export const SURPRISE_ME_OPTIONS = [
@@ -729,37 +728,78 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
   );
 
   // Review System States
-  // Fetch live product reviews from backend
-  useEffect(() => {
-    if (!product?.id) return;
-    reviewService.getProductReviews(product.id).then((res) => {
-      if (res.reviews && res.reviews.length > 0) {
-        setAllReviews((prev) => {
-          const ids = new Set(res.reviews.map((r) => r.id));
-          const rest = prev.filter((r) => !ids.has(r.id));
-          return [...res.reviews, ...rest];
-        });
-      }
-    }).catch(() => {});
-  }, [product?.id]);
-
-  const [allReviews, setAllReviews] = useState<Review[]>(() => {
-    try {
-      const stored = localStorage.getItem(LOCAL_REVIEWS_KEY);
-      const parsed = stored ? JSON.parse(stored) : [];
-      return [...parsed, ...reviewsData];
-    } catch {
-      return reviewsData;
-    }
-  });
-
+  const [allReviews, setAllReviews] = useState<Review[]>([]);
+  const [reviewLoadError, setReviewLoadError] = useState<string | null>(null);
   const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false);
   const [newRating, setNewRating] = useState<number>(5);
   const [hoverRating, setHoverRating] = useState<number>(0);
   const [newTitle, setNewTitle] = useState('');
   const [newComment, setNewComment] = useState('');
-  const [newAuthor, setNewAuthor] = useState('');
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const reviewDialogRef = useRef<HTMLDivElement>(null);
+  const reviewCloseButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!isReviewModalOpen) return;
+
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    reviewCloseButtonRef.current?.focus();
+
+    const handleDialogKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsReviewModalOpen(false);
+        setReviewError(null);
+        return;
+      }
+      if (event.key !== 'Tab' || !reviewDialogRef.current) return;
+
+      const focusableElements = Array.from(
+        reviewDialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])'
+        )
+      );
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+      if (!firstElement || !lastElement) return;
+
+      if (event.shiftKey && document.activeElement === firstElement) {
+        event.preventDefault();
+        lastElement.focus();
+      } else if (!event.shiftKey && document.activeElement === lastElement) {
+        event.preventDefault();
+        firstElement.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleDialogKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleDialogKeyDown);
+      document.body.style.overflow = previousOverflow;
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, [isReviewModalOpen]);
+
+  useEffect(() => {
+    if (!product?.id) return;
+
+    let isCurrentProduct = true;
+    setReviewLoadError(null);
+    setAllReviews([]);
+    reviewService.getProductReviews(product.id).then((res) => {
+      if (isCurrentProduct) setAllReviews(res.reviews);
+    }).catch((error: unknown) => {
+      if (isCurrentProduct) {
+        setReviewLoadError(error instanceof Error ? error.message : 'Reviews could not be loaded.');
+      }
+    });
+
+    return () => {
+      isCurrentProduct = false;
+    };
+  }, [product?.id]);
 
   useEffect(() => {
     const handleRep = (e: Event) => {
@@ -786,17 +826,14 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
     );
   }, [allReviews, product]);
 
-  const productReviewCount = relevantReviews.length > 0 ? relevantReviews.length : (product.reviewCount || 0);
+  const productReviewCount = relevantReviews.length;
   const averageRating = useMemo(() => {
     if (relevantReviews.length > 0) {
       const sum = relevantReviews.reduce((acc, r) => acc + (r.rating || 5), 0);
       return Number((sum / relevantReviews.length).toFixed(1));
     }
-    if (product.reviewCount > 0 && product.rating > 0) {
-      return product.rating;
-    }
     return 0;
-  }, [relevantReviews, product.reviewCount, product.rating]);
+  }, [relevantReviews]);
 
   const { data: relatedItems } = useRelatedProducts(product, 4);
   const relatedProducts = relatedItems ?? [];
@@ -938,12 +975,8 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
   };
 
   // Review submission
-  const handleSubmitReview = (e: React.FormEvent) => {
+  const handleSubmitReview = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newAuthor.trim()) {
-      setReviewError('Please enter your name.');
-      return;
-    }
     if (!newTitle.trim()) {
       setReviewError('Please provide a review headline.');
       return;
@@ -953,53 +986,28 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
       return;
     }
 
-    const createdReview: Review = {
-      id: `rev-user-${Date.now()}`,
-      productId: product.id,
-      productName: product.name,
-      author: newAuthor.trim(),
-      location: 'Verified Buyer',
-      rating: newRating,
-      date: 'Just now',
-      title: newTitle.trim(),
-      comment: newComment.trim(),
-      verified: true,
-      revealedSurprise: isJewelrySurprise
-        ? `Selected Size ${selectedRingSize} Jewelry Reveal`
-        : 'Guaranteed Authentic Prize Inside',
-    };
-
-    const updated = [createdReview, ...allReviews];
-    setAllReviews(updated);
-
+    setIsSubmittingReview(true);
     try {
-      const stored = localStorage.getItem(LOCAL_REVIEWS_KEY);
-      const existingUserReviews: Review[] = stored ? JSON.parse(stored) : [];
-      localStorage.setItem(LOCAL_REVIEWS_KEY, JSON.stringify([createdReview, ...existingUserReviews]));
-
-    reviewService.createReview({
-      productId: product.id,
-      rating: newRating,
-      title: newTitle.trim(),
-      comment: newComment.trim(),
-      customerName: newAuthor.trim(),
-      surpriseType: product.surpriseType,
-      revealedItem: isJewelrySurprise ? `Selected Size ${selectedRingSize} Jewelry Reveal` : 'Guaranteed Authentic Prize Inside',
-    }).catch((err) => console.warn('Backend review create warning:', err));
-    } catch {
-      // fallback
+      const createdReview = await reviewService.createReview({
+        productId: product.id,
+        rating: newRating,
+        title: newTitle.trim(),
+        comment: newComment.trim(),
+      });
+      setAllReviews((current) => [createdReview, ...current.filter((review) => review.id !== createdReview.id)]);
+      onShowToast?.('Your verified-purchase review has been published.', {
+        title: 'Review Submitted',
+        type: 'success',
+      });
+      setIsReviewModalOpen(false);
+      setNewTitle('');
+      setNewComment('');
+      setReviewError(null);
+    } catch (error: unknown) {
+      setReviewError(error instanceof Error ? error.message : 'Your review could not be submitted. Please try again.');
+    } finally {
+      setIsSubmittingReview(false);
     }
-
-    onShowToast?.('Thank you! Your verified review has been published.', {
-      title: 'Review Submitted',
-      type: 'success',
-    });
-
-    setIsReviewModalOpen(false);
-    setNewTitle('');
-    setNewComment('');
-    setNewAuthor('');
-    setReviewError(null);
   };
 
   return (
@@ -1765,13 +1773,13 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
           <div>
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#fff1f2] border border-[#fecdd3] text-[#D30915] text-xs font-black uppercase tracking-wider mb-2">
               <Star className="w-3.5 h-3.5 fill-current" />
-              <span>Verified Customer Feedback</span>
+              <span>Verified purchase reviews</span>
             </div>
             <h2 className="text-2xl sm:text-3xl font-black text-[#141219] font-display m-0">
-              Customer Reviews &amp; Reveal Stories
+              Customer Reviews
             </h2>
             <p className="text-xs sm:text-sm text-[#716d77] m-0 mt-1">
-              Authentic unboxings and genuine jewelry &amp; cash reveals from real buyers.
+              Feedback from customers with a paid, delivered purchase.
             </p>
           </div>
 
@@ -1838,31 +1846,29 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
           {/* Star Breakdown Bars */}
           <div className="lg:col-span-8 p-6 rounded-3xl bg-white border border-[#eedbe6] space-y-3 flex flex-col justify-center">
             {productReviewCount > 0 ? (
-              [
-                { stars: 5, pct: 88, count: Math.round(productReviewCount * 0.88) },
-                { stars: 4, pct: 9, count: Math.round(productReviewCount * 0.09) },
-                { stars: 3, pct: 2, count: Math.round(productReviewCount * 0.02) },
-                { stars: 2, pct: 1, count: Math.round(productReviewCount * 0.01) },
-                { stars: 1, pct: 0, count: 0 },
-              ].map((bar) => (
-                <div key={bar.stars} className="flex items-center gap-3 text-xs">
-                  <div className="flex items-center gap-1 w-14 shrink-0 font-bold text-[#141219]">
-                    <span>{bar.stars}</span>
-                    <Star className="w-3.5 h-3.5 text-amber-500 fill-current" />
+              [5, 4, 3, 2, 1].map((stars) => {
+                const count = relevantReviews.filter((review) => review.rating === stars).length;
+                const percentage = Math.round((count / productReviewCount) * 100);
+                return (
+                  <div key={stars} className="flex items-center gap-3 text-xs">
+                    <div className="flex items-center gap-1 w-14 shrink-0 font-bold text-[#141219]">
+                      <span>{stars}</span>
+                      <Star className="w-3.5 h-3.5 text-amber-500 fill-current" />
+                    </div>
+                    <div className="flex-1 h-2.5 bg-gray-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-amber-400 to-[#D30915] rounded-full transition-all duration-500"
+                        style={{ width: `${percentage}%` }}
+                      />
+                    </div>
+                    <span className="w-10 text-right font-semibold text-[#716d77]">{count}</span>
                   </div>
-                  <div className="flex-1 h-2.5 bg-gray-100 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-amber-400 to-[#D30915] rounded-full transition-all duration-500"
-                      style={{ width: `${bar.pct}%` }}
-                    />
-                  </div>
-                  <span className="w-10 text-right font-semibold text-[#716d77]">{bar.pct}%</span>
-                </div>
-              ))
+                );
+              })
             ) : (
               <div className="text-center py-6 text-xs text-[#716d77]">
                 <p className="font-semibold text-[#141219] mb-1">No ratings submitted yet</p>
-                <p className="m-0">Customer star breakdown will appear after verified customer unboxings.</p>
+                <p className="m-0">Ratings will appear here after verified customers share their reviews.</p>
               </div>
             )}
           </div>
@@ -1870,7 +1876,11 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
 
         {/* Customer Reviews List */}
         <div className="space-y-4">
-          {relevantReviews.length === 0 ? (
+          {reviewLoadError ? (
+            <div role="alert" className="p-6 rounded-2xl bg-rose-50 border border-rose-200 text-center text-sm text-rose-800">
+              {reviewLoadError}
+            </div>
+          ) : relevantReviews.length === 0 ? (
             <div className="p-8 sm:p-12 rounded-2xl sm:rounded-3xl bg-white border border-[#eedbe6] text-center space-y-3">
               <Gift className="w-10 h-10 text-[#D30915] mx-auto opacity-50" />
               <h4 className="text-base font-bold text-[#141219] m-0">No reviews for this product yet</h4>
@@ -1936,51 +1946,75 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
       </section>
 
       {/* WRITE A REVIEW MODAL */}
-      {isReviewModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs animate-in fade-in duration-200">
-          <div className="relative w-full max-w-lg bg-white rounded-3xl shadow-2xl border border-[#eedbe6] p-6 sm:p-8 space-y-5">
-            <div className="flex items-center justify-between pb-3 border-b border-[#f2edf1]">
+      {isReviewModalOpen && createPortal(
+        <div
+          className="fixed inset-0 z-[100] flex items-start sm:items-center justify-center overflow-y-auto bg-[#141219]/60 p-3 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur-sm animate-in fade-in duration-150"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setIsReviewModalOpen(false);
+              setReviewError(null);
+            }
+          }}
+        >
+          <div
+            ref={reviewDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="review-dialog-title"
+            aria-describedby="review-dialog-description"
+            tabIndex={-1}
+            className="relative my-auto w-full max-w-xl max-h-[calc(100dvh-2rem)] overflow-y-auto bg-white rounded-2xl shadow-[0_24px_80px_rgba(20,18,25,0.28)] border border-[#eedbe6] p-5 sm:p-7"
+          >
+            <div className="space-y-5">
+              <div className="flex items-start justify-between gap-4 pb-4 border-b border-[#f2edf1]">
               <div>
-                <h3 className="text-lg font-black text-[#141219] font-display m-0">
+                <h3 id="review-dialog-title" className="text-xl sm:text-2xl font-black text-[#141219] font-display m-0">
                   Write a Product Review
                 </h3>
-                <p className="text-xs text-[#716d77] m-0 mt-0.5">
-                  Share your unboxing experience for {product.name}
+                <p id="review-dialog-description" className="text-sm text-[#716d77] m-0 mt-1">
+                  Share your experience with {product.name}
+                </p>
+                <p className="text-xs text-[#716d77] m-0 mt-2">
+                  Reviews are accepted from signed-in customers after their paid order is delivered.
                 </p>
               </div>
               <button
+                ref={reviewCloseButtonRef}
                 type="button"
+                aria-label="Close review form"
                 onClick={() => {
                   setIsReviewModalOpen(false);
                   setReviewError(null);
                 }}
-                className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-[#141219] flex items-center justify-center cursor-pointer transition-colors"
+                className="w-9 h-9 rounded-full bg-[#faf7f9] hover:bg-[#f3e8ee] text-[#141219] flex items-center justify-center cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D30915]/60"
               >
                 <X className="w-4 h-4" />
               </button>
-            </div>
+              </div>
 
             {reviewError && (
-              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 font-medium">
+              <div role="alert" className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-sm text-rose-800 font-medium">
                 {reviewError}
               </div>
             )}
 
-            <form onSubmit={handleSubmitReview} className="space-y-4">
+            <form onSubmit={handleSubmitReview} className="space-y-5">
               {/* Star Rating Picker */}
               <div>
-                <label className="block text-xs font-bold text-[#141219] mb-1.5">
+                <label id="review-rating-label" className="block text-sm font-bold text-[#141219] mb-2">
                   Overall Rating
                 </label>
-                <div className="flex items-center gap-1.5">
+                <div role="group" aria-labelledby="review-rating-label" className="flex items-center gap-1.5">
                   {[1, 2, 3, 4, 5].map((star) => (
                     <button
                       key={star}
                       type="button"
+                      aria-label={`Rate ${star} out of 5 stars`}
+                      aria-pressed={newRating === star}
                       onMouseEnter={() => setHoverRating(star)}
                       onMouseLeave={() => setHoverRating(0)}
                       onClick={() => setNewRating(star)}
-                      className="p-1 cursor-pointer transition-transform hover:scale-110 focus:outline-none"
+                      className="p-1 cursor-pointer transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D30915]/60 rounded-md"
                     >
                       <Star
                         className={`w-7 h-7 ${
@@ -1991,51 +2025,44 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
                       />
                     </button>
                   ))}
-                  <span className="text-xs font-bold text-[#716d77] ml-2">
+                  <span aria-live="polite" className="text-sm font-bold text-[#716d77] ml-2">
                     {newRating} of 5 Stars
                   </span>
                 </div>
               </div>
 
-              {/* Author Name */}
-              <div>
-                <label className="block text-xs font-bold text-[#141219] mb-1">
-                  Your Full Name
-                </label>
-                <input
-                  type="text"
-                  value={newAuthor}
-                  onChange={(e) => setNewAuthor(e.target.value)}
-                  placeholder="Your name"
-                  className="w-full h-10 px-3.5 rounded-xl bg-[#faf7f9] border border-[#eedbe6] text-xs text-[#141219] focus:outline-none focus:border-[#D30915]"
-                />
-              </div>
-
               {/* Review Headline */}
               <div>
-                <label className="block text-xs font-bold text-[#141219] mb-1">
+                <label htmlFor="review-title" className="block text-sm font-bold text-[#141219] mb-2">
                   Review Headline
                 </label>
                 <input
+                  id="review-title"
                   type="text"
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
-                  placeholder="e.g. Found a gorgeous $250 Sterling Silver ring!"
-                  className="w-full h-10 px-3.5 rounded-xl bg-[#faf7f9] border border-[#eedbe6] text-xs text-[#141219] focus:outline-none focus:border-[#D30915]"
+                  maxLength={120}
+                  required
+                  placeholder="What stood out to you?"
+                  className="w-full min-h-12 px-4 rounded-xl bg-[#faf7f9] border border-[#d8cbd3] text-sm text-[#141219] placeholder:text-[#716d77] focus:outline-none focus:border-[#D30915] focus:ring-2 focus:ring-[#D30915]/20"
                 />
               </div>
 
               {/* Review Comment */}
               <div>
-                <label className="block text-xs font-bold text-[#141219] mb-1">
-                  Review Details &amp; Reveal Story
+                <label htmlFor="review-comment" className="block text-sm font-bold text-[#141219] mb-2">
+                  Your Review
                 </label>
                 <textarea
+                  id="review-comment"
                   rows={4}
                   value={newComment}
                   onChange={(e) => setNewComment(e.target.value)}
-                  placeholder="Describe the fragrance, candle burn time, and your treasure unboxing surprise..."
-                  className="w-full p-3 rounded-xl bg-[#faf7f9] border border-[#eedbe6] text-xs text-[#141219] focus:outline-none focus:border-[#D30915]"
+                  minLength={10}
+                  maxLength={2000}
+                  required
+                  placeholder="Tell other customers about your experience with this product."
+                  className="w-full min-h-32 p-4 rounded-xl bg-[#faf7f9] border border-[#d8cbd3] text-sm text-[#141219] placeholder:text-[#716d77] focus:outline-none focus:border-[#D30915] focus:ring-2 focus:ring-[#D30915]/20 resize-y"
                 />
               </div>
 
@@ -2047,20 +2074,23 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
                     setIsReviewModalOpen(false);
                     setReviewError(null);
                   }}
-                  className="px-4 py-2.5 rounded-xl border border-gray-200 text-xs font-bold text-[#716d77] hover:bg-gray-50 cursor-pointer"
+                  className="px-4 py-3 rounded-xl border border-[#d8cbd3] text-sm font-bold text-[#524d58] hover:bg-gray-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D30915]/60"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 rounded-xl bg-[#D30915] hover:bg-[#b80712] text-white text-xs font-black uppercase tracking-wider shadow-sm transition-all cursor-pointer"
+                  disabled={isSubmittingReview}
+                  className="px-5 py-3 rounded-xl bg-[#D30915] hover:bg-[#b80712] disabled:opacity-60 text-white text-sm font-bold tracking-wide shadow-sm transition-all cursor-pointer disabled:cursor-wait focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D30915]/60 focus-visible:ring-offset-2"
                 >
-                  Submit Review
+                  {isSubmittingReview ? 'Submitting...' : 'Submit Review'}
                 </button>
               </div>
             </form>
           </div>
-        </div>
+          </div>
+        </div>,
+        document.body
       )}
 
       {/* Related Products Section */}

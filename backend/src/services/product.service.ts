@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { prisma } from '../lib/prisma';
 import { loadProductDetail } from './product-detail.query';
 import {
@@ -106,7 +107,7 @@ export const DEFAULT_CATALOG: readonly ProductResponseDTO[] = [
     categoryId: 'cat-halloween',
     categoryName: 'CANDLES',
     badge: 'CANDLES',
-    rating: 4.8,
+    rating: 0,
     reviewCount: 0,
     stock: 50,
     inStock: true,
@@ -157,14 +158,14 @@ export const DEFAULT_CATALOG: readonly ProductResponseDTO[] = [
     },
     trustBadges: ['100% Win Guarantee', 'Free Shipping $50+', '30-Day Returns', 'Made in USA'],
     reviewsSummary: {
-      overallRating: 4.8,
+      overallRating: 0,
       maxRating: 5.0,
       totalReviews: 0,
       breakdown: [
-        { stars: 5, percentage: 88, count: 0 },
-        { stars: 4, percentage: 9, count: 0 },
-        { stars: 3, percentage: 2, count: 0 },
-        { stars: 2, percentage: 1, count: 0 },
+        { stars: 5, percentage: 0, count: 0 },
+        { stars: 4, percentage: 0, count: 0 },
+        { stars: 3, percentage: 0, count: 0 },
+        { stars: 2, percentage: 0, count: 0 },
         { stars: 1, percentage: 0, count: 0 },
       ],
       appraisedValueRange: '$10 - $7,500',
@@ -188,8 +189,8 @@ export const DEFAULT_CATALOG: readonly ProductResponseDTO[] = [
     categoryId: 'cat-christmas',
     categoryName: 'CANDLES',
     badge: 'Holiday Priority',
-    rating: 4.9,
-    reviewCount: 12,
+    rating: 0,
+    reviewCount: 0,
     stock: 65,
     inStock: true,
     lowStockThreshold: 5,
@@ -220,12 +221,12 @@ export const DEFAULT_CATALOG: readonly ProductResponseDTO[] = [
     },
     trustBadges: ['100% Win Guarantee', 'Free Shipping $50+', '30-Day Returns', 'Made in USA'],
     reviewsSummary: {
-      overallRating: 4.9,
+      overallRating: 0,
       maxRating: 5.0,
-      totalReviews: 12,
+      totalReviews: 0,
       breakdown: [
-        { stars: 5, percentage: 92, count: 11 },
-        { stars: 4, percentage: 8, count: 1 },
+        { stars: 5, percentage: 0, count: 0 },
+        { stars: 4, percentage: 0, count: 0 },
         { stars: 3, percentage: 0, count: 0 },
         { stars: 2, percentage: 0, count: 0 },
         { stars: 1, percentage: 0, count: 0 },
@@ -251,8 +252,8 @@ export const DEFAULT_CATALOG: readonly ProductResponseDTO[] = [
     categoryId: 'cat-cash-candles',
     categoryName: 'CANDLES',
     badge: 'Win Up To $2,500',
-    rating: 4.7,
-    reviewCount: 28,
+    rating: 0,
+    reviewCount: 0,
     stock: 40,
     inStock: true,
     lowStockThreshold: 5,
@@ -283,13 +284,13 @@ export const DEFAULT_CATALOG: readonly ProductResponseDTO[] = [
     },
     trustBadges: ['100% Win Guarantee', 'Free Shipping $50+', '30-Day Returns', 'Made in USA'],
     reviewsSummary: {
-      overallRating: 4.7,
+      overallRating: 0,
       maxRating: 5.0,
-      totalReviews: 28,
+      totalReviews: 0,
       breakdown: [
-        { stars: 5, percentage: 85, count: 24 },
-        { stars: 4, percentage: 11, count: 3 },
-        { stars: 3, percentage: 4, count: 1 },
+        { stars: 5, percentage: 0, count: 0 },
+        { stars: 4, percentage: 0, count: 0 },
+        { stars: 3, percentage: 0, count: 0 },
         { stars: 2, percentage: 0, count: 0 },
         { stars: 1, percentage: 0, count: 0 },
       ],
@@ -314,8 +315,8 @@ export const DEFAULT_CATALOG: readonly ProductResponseDTO[] = [
     categoryId: 'cat-zodiac',
     categoryName: 'CANDLES',
     badge: 'Real Cash Inside',
-    rating: 4.8,
-    reviewCount: 19,
+    rating: 0,
+    reviewCount: 0,
     stock: 35,
     inStock: true,
     lowStockThreshold: 5,
@@ -346,12 +347,12 @@ export const DEFAULT_CATALOG: readonly ProductResponseDTO[] = [
     },
     trustBadges: ['100% Win Guarantee', 'Free Shipping $50+', '30-Day Returns', 'Made in USA'],
     reviewsSummary: {
-      overallRating: 4.8,
+      overallRating: 0,
       maxRating: 5.0,
-      totalReviews: 19,
+      totalReviews: 0,
       breakdown: [
-        { stars: 5, percentage: 89, count: 17 },
-        { stars: 4, percentage: 11, count: 2 },
+        { stars: 5, percentage: 0, count: 0 },
+        { stars: 4, percentage: 0, count: 0 },
         { stars: 3, percentage: 0, count: 0 },
         { stars: 2, percentage: 0, count: 0 },
         { stars: 1, percentage: 0, count: 0 },
@@ -511,6 +512,21 @@ export const formatDbProduct = (product: any): ProductResponseDTO => {
     name: pc.collections?.name || '',
     slug: pc.collections?.slug || '',
   })).filter((c: any) => c.id) || [];
+  const publishedRatings: number[] = Array.isArray(product.product_reviews)
+    ? product.product_reviews.map((review: { rating: number }) => review.rating)
+    : [];
+  const reviewCount = publishedRatings.length;
+  const rating = reviewCount
+    ? publishedRatings.reduce((total, value) => total + value, 0) / reviewCount
+    : 0;
+  const ratingBreakdown = [5, 4, 3, 2, 1].map((stars) => {
+    const count = publishedRatings.filter((value) => value === stars).length;
+    return {
+      stars,
+      percentage: reviewCount ? Math.round((count / reviewCount) * 100) : 0,
+      count,
+    };
+  });
 
   return {
     id: product.id,
@@ -526,8 +542,8 @@ export const formatDbProduct = (product: any): ProductResponseDTO => {
     categoryName: product.categories?.name || primaryCollection?.name || product.badge || 'CANDLES',
     badge: product.badge || primaryCollection?.name || 'CANDLES',
     collections,
-    rating: product.rating ? Number(product.rating) : 4.8,
-    reviewCount: product.reviewCount || 0,
+    rating,
+    reviewCount,
     stock: product.stock ?? 50,
     inStock: (product.stock ?? 50) > 0,
     lowStockThreshold: product.lowStockThreshold || 5,
@@ -557,16 +573,10 @@ export const formatDbProduct = (product: any): ProductResponseDTO => {
     },
     trustBadges: ['100% Win Guarantee', 'Free Shipping $50+', '30-Day Returns', 'Made in USA'],
     reviewsSummary: {
-      overallRating: product.rating ? Number(product.rating) : 4.8,
+      overallRating: rating,
       maxRating: 5.0,
-      totalReviews: product.reviewCount || 0,
-      breakdown: [
-        { stars: 5, percentage: 88, count: 0 },
-        { stars: 4, percentage: 9, count: 0 },
-        { stars: 3, percentage: 2, count: 0 },
-        { stars: 2, percentage: 1, count: 0 },
-        { stars: 1, percentage: 0, count: 0 },
-      ],
+      totalReviews: reviewCount,
+      breakdown: ratingBreakdown,
       appraisedValueRange: appraisedRange,
       guaranteeBadge: '100% Win Guarantee Verified',
     },
@@ -661,12 +671,17 @@ export const listProducts = async (query: ListProductsQueryDTO): Promise<{
         categories: true,
         product_images: { orderBy: { sortOrder: 'asc' } },
         product_variants: true,
+        product_reviews: {
+          where: { isApproved: true, isVerifiedPurchase: true },
+          select: { rating: true },
+        },
         product_options: {
           include: {
             product_option_values: { orderBy: { sortOrder: 'asc' } },
           },
         },
         product_collections: {
+          orderBy: { sortOrder: 'asc' },
           include: {
             collections: {
               select: { id: true, name: true, slug: true },
@@ -815,6 +830,10 @@ export const getProductsBatch = async (ids: string[]): Promise<ProductResponseDT
         categories: true,
         product_images: { orderBy: { sortOrder: 'asc' } },
         product_variants: true,
+        product_reviews: {
+          where: { isApproved: true, isVerifiedPurchase: true },
+          select: { rating: true },
+        },
         product_options: {
           include: {
             product_option_values: { orderBy: { sortOrder: 'asc' } },
@@ -865,13 +884,92 @@ export const getProductsBatch = async (ids: string[]): Promise<ProductResponseDT
   return results;
 };
 
-export const createReview = async (productId: string, userId: string, data: CreateReviewDTO): Promise<any> => {
-  try {
-    const product = await getProductByIdOrSlug(productId);
+const reviewRelations = {
+  users: { select: { firstName: true, lastName: true } },
+  products: { select: { name: true } },
+} as const;
 
-    const review = await prisma.product_reviews.create({
+type ProductReviewWithRelations = Prisma.product_reviewsGetPayload<{
+  include: typeof reviewRelations;
+}>;
+
+const formatProductReview = (review: ProductReviewWithRelations) => ({
+  id: review.id,
+  productId: review.productId,
+  author: [review.users.firstName, review.users.lastName?.charAt(0)]
+    .filter(Boolean)
+    .join(' ') || 'Verified customer',
+  rating: review.rating,
+  date: review.createdAt.toISOString().slice(0, 10),
+  title: review.title || '',
+  comment: review.comment,
+  verified: review.isVerifiedPurchase,
+  productName: review.products.name,
+});
+
+export const getProductReviews = async (productIdOrSlug: string) => {
+  const product = await getProductByIdOrSlug(productIdOrSlug);
+  const reviews = await prisma.product_reviews.findMany({
+    where: {
+      productId: product.id,
+      isApproved: true,
+      isVerifiedPurchase: true,
+    },
+    include: reviewRelations,
+    orderBy: { createdAt: 'desc' },
+  });
+
+  return reviews.map(formatProductReview);
+};
+
+export const getRecentReviews = async (limit: number) => {
+  const reviews = await prisma.product_reviews.findMany({
+    where: {
+      isApproved: true,
+      isVerifiedPurchase: true,
+    },
+    include: reviewRelations,
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+  });
+
+  return reviews.map(formatProductReview);
+};
+
+export const createReview = async (productIdOrSlug: string, userId: string, data: CreateReviewDTO) => {
+  const product = await getProductByIdOrSlug(productIdOrSlug);
+
+  return prisma.$transaction(async (transaction) => {
+    const deliveredPurchase = await transaction.order_items.findFirst({
+      where: {
+        productId: product.id,
+        orders: {
+          userId,
+          status: 'DELIVERED',
+          paymentStatus: 'PAID',
+        },
+      },
+      select: { id: true },
+    });
+
+    if (!deliveredPurchase) {
+      throw Object.assign(
+        new Error('A review can be submitted after a paid order containing this product has been delivered.'),
+        { statusCode: 403 }
+      );
+    }
+
+    const existingReview = await transaction.product_reviews.findUnique({
+      where: { productId_userId: { productId: product.id, userId } },
+      select: { id: true },
+    });
+    if (existingReview) {
+      throw Object.assign(new Error('You have already reviewed this product.'), { statusCode: 409 });
+    }
+
+    const review = await transaction.product_reviews.create({
       data: {
-        id: `rev-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        id: `rev-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         productId: product.id,
         userId,
         rating: data.rating,
@@ -882,21 +980,32 @@ export const createReview = async (productId: string, userId: string, data: Crea
         createdAt: new Date(),
         updatedAt: new Date(),
       },
+      include: reviewRelations,
     });
 
+    const aggregate = await transaction.product_reviews.aggregate({
+      where: {
+        productId: product.id,
+        isApproved: true,
+        isVerifiedPurchase: true,
+      },
+      _avg: { rating: true },
+      _count: { _all: true },
+    });
+
+    await transaction.products.update({
+      where: { id: product.id },
+      data: {
+        rating: aggregate._avg.rating || 0,
+        reviewCount: aggregate._count._all,
+      },
+    });
+
+    return formatProductReview(review);
+  }).then((review) => {
+    invalidateProductCaches();
     return review;
-  } catch (err: any) {
-    if (err.statusCode) throw err;
-    return {
-      id: `rev-${Date.now()}`,
-      productId,
-      userId,
-      rating: data.rating,
-      title: data.title,
-      comment: data.comment,
-      createdAt: new Date(),
-    };
-  }
+  });
 };
 
 export const createProduct = async (data: CreateProductDTO): Promise<ProductResponseDTO> => {
@@ -973,29 +1082,115 @@ export const updateProduct = async (id: string, data: UpdateProductDTO): Promise
     }
   }
 
-  const updated = await prisma.products.update({
-    where: { id },
-    data: {
-      ...(data.name && { name: data.name }),
-      ...(finalSlug && { slug: finalSlug }),
-      ...(data.shortDescription !== undefined && { shortDescription: data.shortDescription }),
-      ...(data.description !== undefined && { description: data.description }),
-      ...(data.price !== undefined && { price: data.price }),
-      ...(data.compareAtPrice !== undefined && { compareAtPrice: data.compareAtPrice }),
-      ...(data.imageUrl !== undefined && { imageUrl: data.imageUrl }),
-      ...(data.categoryId !== undefined && { categoryId: data.categoryId }),
-      ...(data.badge !== undefined && { badge: data.badge }),
-      ...(data.stock !== undefined && { stock: data.stock }),
-      ...(data.status && { status: data.status }),
-      ...(data.scentNotes && { scentNotes: data.scentNotes }),
-      ...(data.ringSizes && { ringSizes: data.ringSizes }),
-      ...(data.jewelryTypes && { jewelryTypes: data.jewelryTypes }),
-      updatedAt: new Date(),
-    },
-    include: {
-      categories: true,
-      product_images: true,
-    },
+  const updated = await prisma.$transaction(async (transaction) => {
+    const product = await transaction.products.update({
+      where: { id },
+      data: {
+        ...(data.name !== undefined && { name: data.name }),
+        ...(finalSlug && { slug: finalSlug }),
+        ...(data.shortDescription !== undefined && { shortDescription: data.shortDescription }),
+        ...(data.description !== undefined && { description: data.description }),
+        ...(data.price !== undefined && { price: data.price }),
+        ...(data.compareAtPrice !== undefined && { compareAtPrice: data.compareAtPrice }),
+        ...(data.imageUrl !== undefined && { imageUrl: data.imageUrl }),
+        ...(data.categoryId !== undefined && { categoryId: data.categoryId }),
+        ...(data.surpriseType !== undefined && { surpriseType: data.surpriseType }),
+        ...(data.surpriseValue !== undefined && { surpriseValue: data.surpriseValue }),
+        ...(data.badge !== undefined && { badge: data.badge }),
+        ...(data.stock !== undefined && { stock: data.stock }),
+        ...(data.lowStockThreshold !== undefined && { lowStockThreshold: data.lowStockThreshold }),
+        ...(data.sku !== undefined && { sku: data.sku }),
+        ...(data.isBestSeller !== undefined && { isBestSeller: data.isBestSeller }),
+        ...(data.isNew !== undefined && { isNew: data.isNew }),
+        ...(data.status !== undefined && { status: data.status }),
+        ...(data.scentNotes !== undefined && { scentNotes: data.scentNotes }),
+        ...(data.ringSizes !== undefined && { ringSizes: data.ringSizes }),
+        ...(data.jewelryTypes !== undefined && { jewelryTypes: data.jewelryTypes }),
+        updatedAt: new Date(),
+      },
+    });
+
+    if (data.images !== undefined) {
+      await transaction.product_images.deleteMany({ where: { productId: id } });
+      if (data.images.length > 0) {
+        await transaction.product_images.createMany({
+          data: data.images.map((url, sortOrder) => ({
+            id: randomUUID(),
+            productId: id,
+            url,
+            sortOrder,
+            isPrimary: sortOrder === 0,
+          })),
+        });
+      }
+    }
+
+    if (data.options !== undefined) {
+      await transaction.product_options.deleteMany({ where: { productId: id } });
+      for (const option of data.options) {
+        await transaction.product_options.create({
+          data: {
+            id: randomUUID(),
+            productId: id,
+            name: option.name,
+            product_option_values: {
+              create: option.values.map((value, sortOrder) => ({
+                id: randomUUID(),
+                value,
+                sortOrder,
+              })),
+            },
+          },
+        });
+      }
+    }
+
+    if (data.collectionSlug) {
+      const collection = await transaction.collections.findFirst({
+        where: { slug: data.collectionSlug },
+        select: { id: true },
+      });
+      if (!collection) {
+        throw new Error(`Collection "${data.collectionSlug}" was not found.`);
+      }
+
+      await transaction.product_collections.upsert({
+        where: {
+          productId_collectionId: {
+            productId: id,
+            collectionId: collection.id,
+          },
+        },
+        update: { sortOrder: 0 },
+        create: { productId: id, collectionId: collection.id, sortOrder: 0 },
+      });
+      await transaction.product_collections.updateMany({
+        where: {
+          productId: id,
+          collectionId: { not: collection.id },
+          sortOrder: 0,
+        },
+        data: { sortOrder: 1 },
+      });
+    }
+
+    return transaction.products.findUniqueOrThrow({
+      where: { id: product.id },
+      include: {
+        categories: true,
+        product_images: { orderBy: { sortOrder: 'asc' } },
+        product_variants: true,
+        product_options: {
+          include: {
+            product_option_values: { orderBy: { sortOrder: 'asc' } },
+          },
+        },
+        product_collections: {
+          orderBy: { sortOrder: 'asc' },
+          include: { collections: { select: { id: true, name: true, slug: true } } },
+        },
+      },
+    });
   });
 
   invalidateProductCaches();

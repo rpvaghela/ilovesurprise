@@ -3,7 +3,7 @@ name: Deploy Frontend
 on:
   push:
     branches:
-      - main
+      - master
 
 jobs:
   deploy:
@@ -23,7 +23,7 @@ jobs:
 
             echo "Pulling latest code..."
             git fetch origin
-            git reset --hard origin/main
+            git reset --hard origin/master
 
             echo "Installing dependencies..."
             npm ci

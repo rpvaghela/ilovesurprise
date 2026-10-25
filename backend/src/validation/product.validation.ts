@@ -60,7 +60,7 @@ export const updateProductSchema = z.object({
     imageUrl: z.string().url().nullable().optional(),
     categoryId: z.string().nullable().optional(),
     surpriseType: z.string().nullable().optional(),
-    surpriseValue: z.number().nullable().optional(),
+    surpriseValue: z.number().nonnegative().nullable().optional(),
     badge: z.string().nullable().optional(),
     stock: z.number().int().nonnegative().optional(),
     lowStockThreshold: z.number().int().nonnegative().optional(),
@@ -72,5 +72,10 @@ export const updateProductSchema = z.object({
     jewelryTypes: z.array(z.string()).optional(),
     status: z.nativeEnum(ProductStatus).optional(),
     images: z.array(z.string().url()).optional(),
+    collectionSlug: z.string().trim().min(1).nullable().optional(),
+    options: z.array(z.object({
+      name: z.string().trim().min(1),
+      values: z.array(z.string().trim().min(1)),
+    })).optional(),
   }),
 });

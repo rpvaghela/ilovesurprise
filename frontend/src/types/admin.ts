@@ -195,13 +195,15 @@ export interface AdminProductItem {
   name: string;
   sku: string;
   category: string;
+  categoryId?: string | null;
+  collectionSlugs?: string[];
   price: number;
-  originalPrice?: number;
+  originalPrice?: number | null;
   description?: string;
   stock: number;
   lowStockThreshold: number;
   surpriseType: string;
-  surpriseValue?: string;
+  surpriseValue?: string | number | null;
   image: string;
   images?: string[];
   options?: AdminProductOption[];
@@ -508,4 +510,3 @@ export interface AdminStaffUser {
   twoFactorRequired?: boolean;
   status?: 'active' | 'invited' | 'suspended';
 }
-

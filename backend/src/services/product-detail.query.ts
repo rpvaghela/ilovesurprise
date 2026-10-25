@@ -6,6 +6,7 @@ type ProductDetailRow = Prisma.productsGetPayload<{
     categories: true;
     product_images: true;
     product_variants: true;
+    product_reviews: { select: { rating: true } };
     product_options: { include: { product_option_values: true } };
     product_collections: { include: { collections: true } };
   };
@@ -13,13 +14,17 @@ type ProductDetailRow = Prisma.productsGetPayload<{
 
 export async function loadProductDetail(identifier: string): Promise<ProductDetailRow | null> {
   // Aggregate relations in PostgreSQL to avoid a remote round trip per relation.
-  // Reviews are not used by formatDbProduct; its summary comes from the product row.
+  // Only approved reviews from verified purchases contribute to product ratings.
   const rows = await prisma.$queryRaw<ProductDetailRow[]>`
     SELECT p.*, to_jsonb(c) AS categories,
       COALESCE((SELECT jsonb_agg(to_jsonb(i) ORDER BY i."sortOrder")
         FROM product_images i WHERE i."productId" = p.id), '[]'::jsonb) AS product_images,
       COALESCE((SELECT jsonb_agg(to_jsonb(v))
         FROM product_variants v WHERE v."productId" = p.id), '[]'::jsonb) AS product_variants,
+      COALESCE((SELECT jsonb_agg(jsonb_build_object('rating', r.rating))
+        FROM product_reviews r
+        WHERE r."productId" = p.id AND r."isApproved" = true AND r."isVerifiedPurchase" = true),
+        '[]'::jsonb) AS product_reviews,
       COALESCE((SELECT jsonb_agg(to_jsonb(o) || jsonb_build_object(
           'product_option_values', COALESCE((
             SELECT jsonb_agg(to_jsonb(ov) ORDER BY ov."sortOrder")

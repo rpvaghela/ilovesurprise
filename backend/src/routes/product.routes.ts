@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { authenticate } from '../middlewares/auth.middleware';
 import { productController } from '../controllers/product.controller';
 import { validateRequest } from '../middlewares/validate.middleware';
 import {
@@ -77,6 +78,10 @@ productRouter.post('/batch', (req, res, next) => {
   productController.getProductsBatch(req, res, next);
 });
 
+productRouter.get('/reviews', (req, res, next) => {
+  productController.getRecentReviews(req, res, next);
+});
+
 /**
  * @openapi
  * /api/products/{slugOrId}:
@@ -101,6 +106,10 @@ productRouter.post('/batch', (req, res, next) => {
  */
 productRouter.get('/:slugOrId', (req, res, next) => {
   productController.getProduct(req, res, next);
+});
+
+productRouter.get('/:id/reviews', (req, res, next) => {
+  productController.getProductReviews(req, res, next);
 });
 
 /**
@@ -144,6 +153,6 @@ productRouter.get('/:slugOrId', (req, res, next) => {
  *       400:
  *         description: Validation failed.
  */
-productRouter.post('/:id/reviews', validateRequest(createProductReviewSchema), (req, res, next) => {
+productRouter.post('/:id/reviews', authenticate, validateRequest(createProductReviewSchema), (req, res, next) => {
   productController.createReview(req, res, next);
 });

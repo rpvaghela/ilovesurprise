@@ -618,6 +618,7 @@ export const APPROVED_COLLECTIONS_MAP: Record<string, ApprovedCollectionMeta> = 
     "referenceCount": 835,
     "actualCount": 835,
     "title": "Funny Money Candles",
+    "imageUrl": "https://cdn.shopify.com/s/files/1/0172/4672/products/75_Mockup_Jewelry_JewelryCandles_5d4a6586-9d1d-4450-b124-9fc8b2770291.jpg?v=1655831614",
     "description": "<p>Discover the laughter-filled world of Funny Money Candles – the ultimate Funny Gifts for friends, co-workers, and loved ones! Our unique candles are designed to bring joy and amusement to every occasion.<br><br>What sets our Funny Money Candles apart? It all starts with the scent – choose from a variety of options in the drop-down menu to ensure the recipient experiences a fragrance they truly love.<br><br>Key Features:<br>1. ✔ Funny Money Candles make for a hilarious and memorable Funny Gift Idea that your recipients are guaranteed to adore!<br>2. ✔ With over 2,000 different funny sayings to choose from (and counting!), there's a perfect match for every personality.<br>3. ✔ Crafted from 100 percent premium natural soy wax, our candles boast a premium cotton wick for a clean and eco-friendly burn.<br>4. ✔ Each 21 oz. candle offers a typical burn time of 80-100 hours, providing enduring enjoyment.<br>5. ✔ Immerse yourself in high-grade custom fragrances and essential oils, creating a sensory experience like no other.<br>6. ✔ Rest easy knowing our candles are non-toxic, free from lead, plastics, parabens, synthetic dyes, or phthalates.<br>7. ✔ Proudly hand poured and made in the USA – because quality matters. MADE IN AMERICA!<br>8. ✔ Unveil the excitement of a real $2 bill enclosed within every cash money candle.<br>9. ✔ Take a chance! Randomly selected cash candles may reveal up to $2500 inside – adding an extra element of surprise and delight.<br><br>Spread laughter, joy, and the perfect scent with Funny Money Candles – where humor meets high-quality craftsmanship. Light up someone's day with a gift that keeps on giving!</p>",
     "productHandles": [
       "pregnant-af-money-funny-candles-1",
@@ -1539,6 +1540,7 @@ export const APPROVED_COLLECTIONS_MAP: Record<string, ApprovedCollectionMeta> = 
     "referenceCount": 249,
     "actualCount": 249,
     "title": "Anime Cash Candles",
+    "imageUrl": "https://cdn.shopify.com/s/files/1/0172/4672/products/10_Mockup_Jewelry_JewelryCandles_e7df548c-3142-457f-a401-200681ffb061.jpg?v=1649138122",
     "description": "<p>Introducing Anime Cash Candles - the perfect gift for any anime lover! Our unique candles are inspired by your favorite anime characters and feature scents that capture their essence. Choose from our selection of character scents or specific scents to find the perfect match for you.</p>\n<p>But that's not all - each candle also contains a real $2 bill and a chance to win an additional money prize worth up to $2500 with a randomized QR code on select bills. It's the perfect surprise for any anime fan!</p>\n<p>Crafted from high-quality natural soy wax and infused with pure essential oils, our candles promise a clean and long-lasting burn that's free from harmful toxins. And the best part? You get to experience the excitement of discovering your character's scent and a surprise prize all in one!</p>\n<p>Our Anime Cash Candles make great gifts for birthdays, holidays, or any special occasion. Give the gift of anime-inspired scents and a chance to win big. Order now and experience the magic of Anime Cash Candles!</p>",
     "productHandles": [
       "uzumaki-naruto-anime-cash-candle",
@@ -3389,6 +3391,7 @@ export const APPROVED_COLLECTIONS_MAP: Record<string, ApprovedCollectionMeta> = 
     "referenceCount": 92,
     "actualCount": 92,
     "title": "Cash Money Goat Milk Soaps - Goats Milk Soap",
+    "imageUrl": "https://cdn.shopify.com/s/files/1/0172/4672/files/happy_birthday_to_you_goat_milk_soap.jpg?v=1765692096",
     "description": "<p><strong>Cash Money Soap </strong>redefines luxury <strong>goat milk soaps</strong> by combining rich skincare benefits with an unforgettable surprise. Each handcrafted bar is made with creamy, skin-loving goat milk and premium essential oil fragrances, creating a gentle, moisturizing cleanse that leaves your skin soft, smooth, and beautifully scented.</p>\n<p>What makes Cash Money Soap one of the most talked-about <strong>money soaps</strong> online? Every bar contains a <strong>real $2 bill hidden inside</strong>, adding a fun and exciting twist to your daily routine. And for a fortunate few, randomly selected soaps include <strong>bonus cash prizes of up to $2,500</strong>, making every bar a thrilling discovery.</p>\n<p>Our goat milk soaps are carefully formulated using high-quality ingredients and safe fragrance blends, making them perfect for everyday use while still delivering an element of surprise. With a wide variety of irresistible scents to choose from, there’s a Cash Money Soap for everyone.</p>\n<p>Why use ordinary soap when you can wash with something unforgettable? Cash Money Soap is the perfect gift, conversation starter, and self-care upgrade. Experience the skincare benefits of premium <strong>goat milk soaps</strong> and the excitement of real cash inside—order today and see why everyone is talking about our legendary <strong>money soaps</strong>.</p>",
     "productHandles": [
       "happy-birthday-to-you-cash-money-soaps-1",
@@ -3490,6 +3493,8 @@ export const APPROVED_COLLECTIONS_MAP: Record<string, ApprovedCollectionMeta> = 
     "name": "Jewelry Surprise Mystery Boxes",
     "canonicalHandle": "jewelry-surprise-mystery-boxes",
     "aliases": [
+      "jewelry",
+      "jewellery",
       "jewelry-surprise-mystery-boxes",
       "surprise-jewelry-bundles"
     ],
@@ -3498,6 +3503,7 @@ export const APPROVED_COLLECTIONS_MAP: Record<string, ApprovedCollectionMeta> = 
     "actualCount": 8,
     "title": "Jewelry Surprise Mystery Boxes",
     "description": "<h3 data-start=\"88\" data-end=\"130\">✨ <strong data-start=\"94\" data-end=\"126\">Jewelry Surprise Mystery Box</strong> ✨</h3>\n<p data-start=\"131\" data-end=\"409\">Discover the fun of surprise! Each Mystery Jewelry Box includes <strong data-start=\"195\" data-end=\"230\">beautiful, high-quality jewelry</strong> chosen at random. You won’t know what’s inside until you open it — rings, necklaces, bracelets, or earrings may be included. Every box is unique and guaranteed to sparkle. 🎁💎</p>\n<p data-start=\"411\" data-end=\"490\" data-is-last-node=\"\" data-is-only-node=\"\">The perfect gift for anyone who loves jewelry, surprises, and a little mystery!</p>",
+    "imageUrl": "https://cdn.shopify.com/s/files/1/0172/4672/files/mjb.png?v=1763934706",
     "productHandles": [
       "mystery-jewelry-surprise",
       "mystery-jewelry-surprise-4-pieces-of-jewelry",

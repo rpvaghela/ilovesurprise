@@ -1,6 +1,6 @@
 import type { Product } from '../types';
 
-export const productsData: Product[] = [
+export const productsData: Product[] = ([
 {
     "id": "prod_aquarius-zodiac-cash-money-candle",
     "name": "Aquarius Zodiac Cash Money Candle",
@@ -361,9 +361,9 @@ export const productsData: Product[] = [
     "price": 45.99,
     "surpriseType": "jewelry",
     "surpriseValue": "Jewelry inside valued $10 - $7,500",
-    "rating": 4.8,
-    "reviewCount": 52,
-    "image": "https://cdn.shopify.com/s/files/1/0172/4672/files/1000039771_1.jpg?v=1765948819",
+    "rating": 0,
+    "reviewCount": 0,
+    "image": "https://cdn.shopify.com/s/files/1/0172/4672/files/back-and-body-hurts-happy-birthday-jewelry-candle-two-flames.png?v=1791140460",
     "badge": "Bestseller",
     "isBestSeller": true,
     "isNew": false,
@@ -2642,5 +2642,8 @@ export const productsData: Product[] = [
     ],
     "description": "Meet our Giant Dog Cash Wax Melt! Crafted in the shape of an endearing puppy and filled with irresistible home fragrance and real cash surprises inside."
   }
-];
-
+ ] satisfies Product[]).map((product) => ({
+  ...product,
+  rating: 0,
+  reviewCount: 0,
+}));
