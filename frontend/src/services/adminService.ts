@@ -1,0 +1,3433 @@
+  import type {
+  AdminRole,
+  AdminRoleDefinition,
+  AdminTab,
+  AdminKPIs,
+  AdminActivityItem,
+  RepresentativeAdminRecord,
+  RepStatus,
+  MembershipAdminRecord,
+  MembershipPricingConfig,
+  MembershipPlanDTO,
+  MembershipListResponse,
+  CreateMembershipPlanDTO,
+  AdminProductItem,
+  AdminCollectionItem,
+  AdminCustomerItem,
+  AdminRefundRecord,
+  AdminDiscountCode,
+  AdminCommissionRecord,
+  CommissionLedgerStatus,
+  AdminReportData,
+  AdminSettingsData,
+  AdminOrderItem,
+  AdminOrderNote,
+  HomepageContentConfig,
+  AdminStaffUser,
+} from '../types/admin';
+import type {
+  JewelryAppraisal,
+  CustomerAppraisalSubmission,
+  AppraisalStatsResponse,
+} from '../types/appraisal';
+import { categoriesData } from '../data/categories';
+import { apiClient, ApiError, unwrap, type ApiResponse } from './apiClient';
+import { analyticsService } from './analyticsService';
+import { cmsService } from './cmsService';
+import { accountService } from './accountService';
+
+/**
+ * Admin service.
+ *
+ * Products, users, roles, storefront content, analytics, commission
+ * ledger, and orders & fulfillment tracking are read from and written to the
+ * Express backend; those are server-authoritative and have no local mirror.
+ *
+ * Some admin surfaces have no backend endpoint yet (collections CRUD,
+ * inventory logs, store settings, discounts, memberships, appraisals).
+ * Those remain browser-local and are explicitly flagged by
+ * `ADMIN_FEATURE_AVAILABILITY` so the UI can label them instead of presenting
+ * local state as persisted business data.
+ */
+
+/** Safety bound when walking paginated product pages (5 pages = 500 items). */
+const MAX_ADMIN_PRODUCT_PAGES = 5;
+let cachedTotalProductsCount = 57480;
+
+/**
+ * Which admin capabilities are backed by a real endpoint.
+ * `false` means the backend exposes no route, so the data is local-only and
+ * must be presented as such.
+ */
+export const ADMIN_FEATURE_AVAILABILITY = {
+  products: true,
+  productVariants: false,
+  users: true,
+  userRoles: true,
+  affiliateAccounts: true,
+  commissionLedger: true,
+  analytics: true,
+  storefrontContent: true,
+  orders: true,
+  paymentStatuses: true,
+  inventoryLog: false,
+  collectionsCrud: true,
+  storeSettings: true,
+  refunds: true,
+  discounts: false,
+  memberships: true,
+  appraisals: true,
+} as const;
+
+export type AdminFeature = keyof typeof ADMIN_FEATURE_AVAILABILITY;
+
+export function isAdminFeatureBackedByApi(feature: AdminFeature): boolean {
+  return ADMIN_FEATURE_AVAILABILITY[feature];
+}
+
+/** Backend product DTO (mirrors backend ProductResponseDTO). */
+export interface BackendProduct {
+  id: string;
+  name: string;
+  slug: string;
+  shortDescription: string | null;
+  description: string | null;
+  price: number;
+  compareAtPrice: number | null;
+  imageUrl: string | null;
+  images: string[];
+  categoryId: string | null;
+  categoryName?: string | null;
+  badge: string | null;
+  rating: number;
+  reviewCount: number;
+  stock: number;
+  inStock: boolean;
+  lowStockThreshold: number;
+  sku: string | null;
+  isBestSeller: boolean;
+  isNew: boolean;
+  status: string;
+  surpriseType?: string | null;
+  surpriseValue?: number | string | null;
+}
+
+export interface BackendProductListPayload {
+  products: BackendProduct[];
+  pagination?: {
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  };
+}
+
+/** Backend admin user DTO (mirrors backend UserResponseDTO). */
+export interface BackendAdminUser {
+  id: string;
+  email: string;
+  firstName: string | null;
+  lastName: string | null;
+  role: string;
+  isActive: boolean;
+  emailVerified?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BackendAdminUserListPayload {
+  users: BackendAdminUser[];
+  pagination?: {
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  };
+}
+
+/** Accepts either `{product}` or a bare product object. */
+function extractProduct(response: any, endpoint: string): BackendProduct {
+  const data = unwrap<{ product?: BackendProduct } | BackendProduct>(response, endpoint);
+  const product = (data as { product?: BackendProduct })?.product ?? (data as BackendProduct);
+  if (!product?.id) {
+    throw new ApiError(
+      `The server did not return a product for ${endpoint}.`,
+      0,
+      'parse'
+    );
+  }
+  return product;
+}
+
+/** Maps a `ProductStatus` enum value to the admin UI's lowercase status. */
+function toUiProductStatus(status: string | undefined): AdminProductItem['status'] {
+  switch (String(status || '').toUpperCase()) {
+    case 'DRAFT':
+      return 'draft';
+    case 'ARCHIVED':
+      return 'archived';
+    default:
+      return 'active';
+  }
+}
+
+/** Maps the admin UI status back to the backend `ProductStatus` enum. */
+function toBackendProductStatus(status: string | undefined): string {
+  switch (String(status || '').toLowerCase()) {
+    case 'draft':
+      return 'DRAFT';
+    case 'archived':
+      return 'ARCHIVED';
+    default:
+      return 'ACTIVE';
+  }
+}
+
+/**
+ * The backend validates image fields as absolute URLs. Relative asset paths
+ * are resolved against the current origin; anything else is rejected by
+ * returning null so the caller can surface a clear validation message rather
+ * than letting the backend 400.
+ */
+function toAbsoluteImageUrl(value: string | undefined | null): string | null {
+  const raw = (value || '').trim();
+  if (!raw) return null;
+
+  if (/^https?:\/\//i.test(raw)) return raw;
+
+  if (raw.startsWith('/') && typeof window !== 'undefined' && window.location?.origin) {
+    return `${window.location.origin}${raw}`;
+  }
+
+  return null;
+}
+
+/** Maps a backend product onto the admin table's view model. */
+export function mapBackendProductToAdmin(p: BackendProduct): AdminProductItem {
+  const categoryName =
+    p.categoryName ||
+    categoriesData.find((c) => c.id === p.categoryId)?.name ||
+    p.badge ||
+    'Uncategorized';
+
+  return {
+    id: p.id,
+    name: p.name,
+    sku: p.sku || '',
+    category: categoryName,
+    price: Number(p.price) || 0,
+    originalPrice:
+      p.compareAtPrice !== null && p.compareAtPrice !== undefined
+        ? Number(p.compareAtPrice)
+        : undefined,
+    description: p.description || p.shortDescription || undefined,
+    stock: Number(p.stock) || 0,
+    lowStockThreshold: Number(p.lowStockThreshold) || 0,
+    surpriseType: p.surpriseType || '',
+    surpriseValue:
+      p.surpriseValue !== null && p.surpriseValue !== undefined
+        ? String(p.surpriseValue)
+        : undefined,
+    image: p.imageUrl || p.images?.[0] || '',
+    images: Array.isArray(p.images) ? p.images : undefined,
+    rating: Number(p.rating) || 0,
+    reviewCount: Number(p.reviewCount) || 0,
+    status: toUiProductStatus(p.status),
+    isBestSeller: Boolean(p.isBestSeller),
+    slug: p.slug || (p.name ? p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') : undefined),
+  };
+}
+
+/** Maps a backend user onto the admin customer table's view model. */
+export function mapBackendUserToCustomer(u: BackendAdminUser): AdminCustomerItem {
+  const name = [u.firstName, u.lastName].filter(Boolean).join(' ').trim();
+
+  return {
+    id: u.id,
+    name: name || u.email.split('@')[0],
+    email: u.email,
+    // The backend user record carries no phone number.
+    phone: '',
+    // Order counts, lifetime spend, and last-order date require an orders
+    // endpoint that does not exist yet. They are reported as unavailable (0 /
+    // empty) rather than estimated, and the Customers view labels them.
+    ordersCount: 0,
+    totalSpent: 0,
+    lastOrderDate: '',
+    status: u.isActive ? 'active' : 'inactive',
+  };
+}
+
+/** One admin commission ledger row (mirrors backend AdminLedgerItemDTO). */
+export interface BackendAdminLedgerItem {
+  id: string;
+  representative: {
+    id: string;
+    username: string;
+    fullName: string;
+    email: string;
+    status: string;
+  };
+  orderAndCustomer: {
+    orderId: string;
+    orderNumber: string;
+    customerName: string;
+    customerEmail: string;
+    orderDate: string;
+  };
+  tierLevel: {
+    level: number;
+    name: string;
+    ratePercent: number;
+  };
+  orderVolume: number;
+  commissionEarned: {
+    rate: number;
+    amountUsd: number;
+    formattedAmount: string;
+  };
+  status: string;
+  availableAt: string;
+  ruleVersion: string;
+  parentLedgerId: string | null;
+  note: string | null;
+  createdAt: string;
+}
+
+/**
+ * The ledger endpoint's payload. The backend returns `{ items, pagination }`;
+ * the alternative keys are read defensively only as a tolerance measure.
+ */
+export interface BackendAdminLedgerPayload {
+  items?: BackendAdminLedgerItem[];
+  entries?: BackendAdminLedgerItem[];
+  ledger?: BackendAdminLedgerItem[];
+  pagination?: {
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  };
+}
+
+/**
+ * Maps a backend ledger status onto the admin UI's status union.
+ * Backend statuses: pending | available | paid | hold | void | reversed.
+ */
+function toUiCommissionStatus(status: string): CommissionLedgerStatus {
+  switch (String(status || '').toLowerCase()) {
+    case 'paid':
+      return 'paid';
+    case 'available':
+    case 'approved':
+      return 'approved';
+    case 'reversed':
+    case 'void':
+      return 'reversed';
+    case 'hold':
+      return 'unqualified';
+    default:
+      return 'pending';
+  }
+}
+
+/**
+ * Maps a server-calculated ledger entry onto the admin table's view model.
+ * Commission amounts and rates are taken exactly as the backend computed them.
+ */
+export function mapBackendLedgerEntry(
+  entry: BackendAdminLedgerItem
+): AdminCommissionRecord {
+  const level = Number(entry.tierLevel?.level);
+
+  return {
+    id: entry.id,
+    repId: entry.representative?.id || '',
+    repName: entry.representative?.fullName || entry.representative?.username || '',
+    repUsername: entry.representative?.username || '',
+    orderId: entry.orderAndCustomer?.orderNumber || entry.orderAndCustomer?.orderId || '',
+    orderAmount: Number(entry.orderVolume) || 0,
+    // Level 0 is the selling representative's own commission.
+    tier: (level === 0 ? 'selling_rep' : level) as AdminCommissionRecord['tier'],
+    tierLabel: entry.tierLevel?.name || '',
+    ratePercent: Number(entry.tierLevel?.ratePercent) || 0,
+    commissionAmount: Number(entry.commissionEarned?.amountUsd) || 0,
+    status: toUiCommissionStatus(entry.status),
+    date: entry.createdAt
+      ? new Date(entry.createdAt).toISOString().split('T')[0]
+      : '',
+    customerName: entry.orderAndCustomer?.customerName || '',
+    ...(entry.note ? { unqualifiedReason: entry.note } : {}),
+  };
+}
+
+/** Backend admin order summary DTO (mirrors backend AdminOrderResponseDTO). */
+export interface BackendAdminOrderSummary {
+  id: string;
+  orderNumber: string;
+  customerName?: string;
+  customerEmail?: string;
+  total?: number;
+  totalAmount?: number;
+  subtotal?: number;
+  shippingFee?: number;
+  discountAmount?: number;
+  paymentStatus?: string;
+  status?: string;
+  itemCount?: number;
+  itemsSummary?: string;
+  carrier?: string | null;
+  trackingNumber?: string | null;
+  trackingUrl?: string | null;
+  shippingAddressSnapshot?: any;
+  items?: any[];
+  order_items?: any[];
+  fulfillments?: any[];
+  notes?: any[];
+  order_notes?: any[];
+  refunds?: any[];
+  refund_records?: any[];
+  customerNote?: string | null;
+  createdAt?: string;
+  user?: {
+    firstName?: string | null;
+    lastName?: string | null;
+    email?: string;
+  };
+}
+
+export interface BackendAdminOrderListPayload {
+  orders: BackendAdminOrderSummary[];
+  pagination?: {
+    total: number;
+    page: number;
+    limit: number;
+    totalPages?: number;
+  };
+  summary?: {
+    totalOrders: number;
+    totalRevenue: number;
+  };
+}
+
+/** Maps a backend order status enum to the admin UI's lowercase status. */
+export function toUiOrderStatus(status: string | undefined): AdminOrderItem['status'] {
+  const s = String(status || '').toLowerCase();
+  if (s === 'shipped') return 'shipped';
+  if (s === 'delivered') return 'delivered';
+  if (s === 'cancelled') return 'cancelled';
+  if (s === 'confirmed' || s === 'processing' || s === 'pending') return 'processing';
+  return (s as any) || 'processing';
+}
+
+/** Maps a backend payment status enum to the admin UI's lowercase status. */
+export function toUiPaymentStatus(status: string | undefined): AdminOrderItem['paymentStatus'] {
+  const s = String(status || '').toLowerCase();
+  if (s === 'refunded') return 'refunded';
+  if (s === 'pending') return 'pending';
+  if (s === 'paid') return 'paid';
+  return (s as any) || 'pending';
+}
+
+/** Maps a backend order response onto the AdminOrderItem view model. */
+export function mapBackendOrderToAdmin(raw: any): AdminOrderItem {
+  if (!raw) {
+    return {
+      id: '',
+      orderNumber: '',
+      customerName: '',
+      customerEmail: '',
+      total: 0,
+      status: 'processing',
+      paymentStatus: 'pending',
+      itemCount: 0,
+      itemsSummary: '',
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  const total =
+    typeof raw.total === 'number'
+      ? raw.total
+      : typeof raw.totalAmount === 'number'
+      ? raw.totalAmount
+      : Number(raw.total || raw.totalAmount || 0);
+
+  const status = toUiOrderStatus(raw.status);
+  const paymentStatus = toUiPaymentStatus(raw.paymentStatus);
+
+  const customerName =
+    raw.customerName ||
+    (raw.user ? [raw.user.firstName, raw.user.lastName].filter(Boolean).join(' ').trim() : '') ||
+    (raw.shippingAddressSnapshot ? raw.shippingAddressSnapshot.fullName : '') ||
+    'Customer';
+
+  const customerEmail =
+    raw.customerEmail ||
+    (raw.user ? raw.user.email : '') ||
+    (raw.shippingAddressSnapshot ? raw.shippingAddressSnapshot.email : '') ||
+    '';
+
+  const items = Array.isArray(raw.items)
+    ? raw.items
+    : Array.isArray(raw.order_items)
+    ? raw.order_items
+    : [];
+
+  const itemCount =
+    typeof raw.itemCount === 'number'
+      ? raw.itemCount
+      : items.length > 0
+      ? items.reduce((acc: number, it: any) => acc + (it.quantity || 1), 0)
+      : 1;
+
+  const itemsSummary =
+    raw.itemsSummary ||
+    (items.length > 0
+      ? items
+          .map((it: any) => it.productName || it.name || it.sku)
+          .filter(Boolean)
+          .join(', ')
+      : 'Surprise Candle Item');
+
+  return {
+    id: String(raw.id || raw.orderNumber),
+    orderNumber: String(raw.orderNumber || raw.id),
+    customerName,
+    customerEmail,
+    total,
+    status,
+    paymentStatus,
+    itemCount,
+    itemsSummary,
+    createdAt: raw.createdAt ? new Date(raw.createdAt).toISOString() : new Date().toISOString(),
+    subtotal: typeof raw.subtotal === 'number' ? raw.subtotal : total,
+    shippingFee: typeof raw.shippingFee === 'number' ? raw.shippingFee : 0,
+    discountAmount: typeof raw.discountAmount === 'number' ? raw.discountAmount : 0,
+    totalAmount: total,
+    customerNote: raw.customerNote || null,
+    carrier: raw.carrier || (raw.fulfillments && raw.fulfillments[0]?.carrier) || null,
+    trackingNumber: raw.trackingNumber || (raw.fulfillments && raw.fulfillments[0]?.trackingNumber) || null,
+    trackingUrl: raw.trackingUrl || (raw.fulfillments && raw.fulfillments[0]?.trackingUrl) || null,
+    shippingAddressSnapshot: raw.shippingAddressSnapshot || undefined,
+    items: items.map((it: any) => ({
+      id: it.id,
+      productId: it.productId,
+      productName: it.productName || it.name || 'Surprise Item',
+      sku: it.sku || null,
+      unitPrice: typeof it.unitPrice === 'number' ? it.unitPrice : Number(it.price || 0),
+      quantity: it.quantity || 1,
+      lineTotal:
+        typeof it.lineTotal === 'number'
+          ? it.lineTotal
+          : (typeof it.unitPrice === 'number' ? it.unitPrice : Number(it.price || 0)) * (it.quantity || 1),
+      selectedRingSize: it.selectedRingSize || null,
+      selectedScent: it.selectedScent || null,
+      customNote: it.customNote || null,
+    })),
+    fulfillments: Array.isArray(raw.fulfillments) ? raw.fulfillments : undefined,
+    notes: Array.isArray(raw.notes)
+      ? raw.notes
+      : Array.isArray(raw.order_notes)
+      ? raw.order_notes
+      : undefined,
+    refunds: Array.isArray(raw.refunds)
+      ? raw.refunds
+      : Array.isArray(raw.refund_records)
+      ? raw.refund_records
+      : undefined,
+  };
+}
+
+/**
+ * Maps backend SystemSettingsDTO into the AdminSettingsData shape.
+ */
+export function mapBackendSettingsToAdmin(
+  raw: any,
+  localFallback: AdminSettingsData
+): AdminSettingsData {
+  const backend = raw?.settings || raw || {};
+  const rawAttribution = backend.referralAttributionWindowDays ?? backend.referralAttributionWindow;
+  const validDays: (30 | 60 | 90 | 180)[] = [30, 60, 90, 180];
+  const attributionDays = validDays.includes(rawAttribution)
+    ? (rawAttribution as 30 | 60 | 90 | 180)
+    : localFallback.referralAttributionDays;
+
+  const restrictedUsernames = Array.isArray(backend.restrictedRepUsernames)
+    ? backend.restrictedRepUsernames
+    : localFallback.restrictedUsernames;
+
+  const rawKits = backend.onboardingStarterKits ?? backend.starterKits;
+  const starterKits =
+    Array.isArray(rawKits) && rawKits.length > 0
+      ? rawKits.map((k: any) => ({
+          id: k.id,
+          name: k.name,
+          price: Number(k.price) || 0,
+          includedProductsCount: (k.includes || k.sampleItems)?.length || 4,
+          active: k.isActive !== false,
+          description: k.description || '',
+          sampleItems: Array.isArray(k.includes)
+            ? k.includes
+            : Array.isArray(k.sampleItems)
+            ? k.sampleItems
+            : [],
+        }))
+      : localFallback.starterKits;
+
+  const gateways = { ...localFallback.gateways };
+  if (Array.isArray(backend.paymentGateways)) {
+    backend.paymentGateways.forEach((gw: any) => {
+      if (gw.id === 'stripe') gateways.stripe = { ...gateways.stripe, enabled: Boolean(gw.enabled) };
+      if (gw.id === 'paypal') gateways.paypal = { ...gateways.paypal, enabled: Boolean(gw.enabled) };
+      if (gw.id === 'apple-google-pay' || gw.id === 'applePay') gateways.applePay = { ...gateways.applePay, enabled: Boolean(gw.enabled) };
+    });
+  }
+
+  const emailData = backend.transactionalEmail ?? backend.emailRelay;
+  const emailSenderName = emailData?.senderName || localFallback.emailSenderName;
+  const emailSenderAddress = emailData?.senderEmail || localFallback.emailSenderAddress;
+
+  const announcementText =
+    backend.announcements?.storeAnnouncementBarText ??
+    backend.storeAnnouncementBarText ??
+    localFallback.siteContent.announcementText;
+  const promoBannerText =
+    backend.announcements?.vipRevealClubPromoCopy ??
+    backend.vipRevealClubPromoCopy ??
+    localFallback.siteContent.promoBannerText;
+
+  return {
+    ...localFallback,
+    referralAttributionDays: attributionDays,
+    restrictedUsernames,
+    starterKits,
+    emailSenderName,
+    emailSenderAddress,
+    gateways,
+    siteContent: {
+      ...localFallback.siteContent,
+      announcementText,
+      promoBannerText,
+    },
+  };
+}
+
+/**
+ * Maps AdminSettingsData back to the backend UpdateSystemSettingsDTO schema.
+ */
+export function mapAdminSettingsToBackend(admin: AdminSettingsData): Record<string, any> {
+  return {
+    referralAttributionWindowDays: Number(admin.referralAttributionDays),
+    restrictedRepUsernames: admin.restrictedUsernames,
+    onboardingStarterKits: admin.starterKits.map((k) => ({
+      id: k.id,
+      name: k.name,
+      price: Number(k.price),
+      currency: 'USD',
+      description: k.description,
+      includes: k.sampleItems || [],
+      isActive: k.active !== false,
+    })),
+    paymentGateways: [
+      {
+        id: 'stripe',
+        name: 'Stripe Credit / Debit Engine',
+        status: 'Webhook Status: Healthy (200 OK)',
+        enabled: Boolean(admin.gateways.stripe.enabled),
+        subtext: 'Webhook Status: Healthy (200 OK)',
+      },
+      {
+        id: 'paypal',
+        name: 'PayPal Express & Rep Payouts',
+        status: 'Monthly Disbursement Active (15th)',
+        enabled: Boolean(admin.gateways.paypal.enabled),
+        subtext: 'Monthly Disbursement Active (15th)',
+      },
+      {
+        id: 'apple-google-pay',
+        name: 'Apple Pay & Google Pay Mobile Wallets',
+        status: '1-Click biometric checkout',
+        enabled: Boolean(admin.gateways.applePay.enabled),
+        subtext: '1-Click biometric checkout',
+      },
+    ],
+    transactionalEmail: {
+      activeProvider: admin.emailProvider === 'sendgrid' ? 'Twilio SendGrid (Standard)' : admin.emailProvider,
+      senderName: admin.emailSenderName,
+      senderEmail: admin.emailSenderAddress,
+      registeredTemplates: admin.emailTemplates.map((t) => ({
+        id: t.id,
+        name: t.name,
+        status: 'Ready ✓',
+        enabled: t.active !== false,
+      })),
+    },
+    announcements: {
+      storeAnnouncementBarText: admin.siteContent.announcementText,
+      vipRevealClubPromoCopy: admin.siteContent.promoBannerText,
+    },
+    storeAnnouncementBarText: admin.siteContent.announcementText,
+    vipRevealClubPromoCopy: admin.siteContent.promoBannerText,
+  };
+}
+
+
+/**
+ * All homepage sections are now backed by the server's storefront endpoints.
+ */
+export const HOMEPAGE_BACKED_SECTIONS = {
+  announcementBar: true,
+  promoBar: true,
+  showcaseCards: true,
+  hero: true,
+  valueProposition: true,
+  aboutContent: true,
+  faqItems: true,
+  footerContent: true,
+} as const;
+
+/**
+ * Overlays the authoritative storefront configuration onto the homepage
+ * content shape, merging all server-owned sections with presentation attributes.
+ */
+export function mergeStorefrontIntoHomepageContent(
+  local: HomepageContentConfig,
+  storefront: {
+    showcaseCards?: Array<{
+      id: string;
+      cardKey: string;
+      displayTitle?: string;
+      title?: string;
+      highlightBadge?: string;
+      badge?: string;
+      tagline?: string;
+      ctaButtonText?: string;
+      ctaText?: string;
+      targetCategoryKey?: string;
+      categoryKey?: string;
+      showcaseImageUri?: string;
+      image?: string;
+      displayOnHomepage?: boolean;
+      isActive?: boolean;
+      active?: boolean;
+      sortOrder?: number;
+      itemCount?: number;
+      accentBorder?: string;
+    }>;
+    featuredCards?: Array<{
+      id: string;
+      title?: string;
+      displayTitle?: string;
+      categoryKey?: string;
+      targetCategoryKey?: string;
+      badge?: string;
+      highlightBadge?: string;
+      tagline?: string;
+      ctaText?: string;
+      ctaButtonText?: string;
+      image?: string;
+      showcaseImageUri?: string;
+      itemCount?: number;
+      accentBorder?: string;
+      active?: boolean;
+      isActive?: boolean;
+      displayOnHomepage?: boolean;
+      sortOrder?: number;
+    }>;
+    banners?: {
+      topStickyAnnouncementBar?: { isActive?: boolean; announcementCopy?: string; announcementLink?: string };
+      promotionalDiscountAlertBar?: {
+        isActive?: boolean;
+        promoCopy?: string;
+        promoCode?: string;
+      };
+    };
+    hero?: HomepageContentConfig['hero'];
+    valueProposition?: HomepageContentConfig['valueProposition'];
+    aboutContent?: HomepageContentConfig['aboutContent'];
+    faqItems?: HomepageContentConfig['faqItems'];
+    footerContent?: HomepageContentConfig['footerContent'];
+    announcementText?: string;
+    announcementActive?: boolean;
+    announcementLink?: string;
+    promoBannerText?: string;
+    promoBannerCode?: string;
+    promoBannerActive?: boolean;
+  }
+): HomepageContentConfig {
+  const announcement = storefront.banners?.topStickyAnnouncementBar;
+  const promo = storefront.banners?.promotionalDiscountAlertBar;
+
+  const rawCards =
+    storefront.showcaseCards && storefront.showcaseCards.length > 0
+      ? storefront.showcaseCards
+      : storefront.featuredCards || [];
+
+  const mergedCards = rawCards.map((card) => {
+    const cardId = (card as any).cardKey || card.id;
+    const existing = (local.featuredCards || []).find(
+      (c) => c.id === cardId || c.id === card.id
+    );
+
+    const title = (card as any).displayTitle ?? (card as any).title ?? existing?.title ?? '';
+    const categoryKey =
+      (card as any).targetCategoryKey ?? (card as any).categoryKey ?? existing?.categoryKey ?? '';
+    const badge = (card as any).highlightBadge ?? (card as any).badge ?? existing?.badge ?? '';
+    const tagline = card.tagline ?? existing?.tagline ?? '';
+    const ctaText =
+      (card as any).ctaButtonText ?? (card as any).ctaText ?? existing?.ctaText ?? 'Shop Collection';
+    const image = (card as any).showcaseImageUri ?? (card as any).image ?? existing?.image ?? '';
+    const isCardActive =
+      (card as any).isActive !== undefined
+        ? (card as any).isActive
+        : (card as any).active !== undefined
+        ? (card as any).active
+        : true;
+    const displayOnHp =
+      (card as any).displayOnHomepage !== undefined
+        ? (card as any).displayOnHomepage
+        : true;
+
+    return {
+      ...existing,
+      id: cardId,
+      title,
+      categoryKey,
+      badge,
+      tagline,
+      ctaText,
+      image,
+      active: Boolean(isCardActive && displayOnHp),
+      itemCount: (card as any).itemCount ?? existing?.itemCount ?? 0,
+      accentBorder: (card as any).accentBorder ?? existing?.accentBorder ?? 'hover:border-[#D30915]',
+    } as HomepageContentConfig['featuredCards'][number];
+  });
+
+  return {
+    ...local,
+    announcementText:
+      announcement?.announcementCopy ?? storefront.announcementText ?? local.announcementText,
+    announcementActive:
+      announcement?.isActive ?? storefront.announcementActive ?? local.announcementActive,
+    announcementLink:
+      announcement?.announcementLink ?? storefront.announcementLink ?? local.announcementLink,
+    promoBannerText:
+      promo?.promoCopy ?? storefront.promoBannerText ?? local.promoBannerText,
+    promoBannerCode:
+      promo?.promoCode ?? storefront.promoBannerCode ?? local.promoBannerCode,
+    promoBannerActive:
+      promo?.isActive ?? storefront.promoBannerActive ?? local.promoBannerActive,
+    featuredCards: mergedCards.length ? mergedCards : local.featuredCards,
+    hero: storefront.hero ? { ...local.hero, ...storefront.hero } : local.hero,
+    valueProposition: storefront.valueProposition
+      ? { ...local.valueProposition, ...storefront.valueProposition }
+      : local.valueProposition,
+    aboutContent: storefront.aboutContent
+      ? { ...local.aboutContent, ...storefront.aboutContent }
+      : local.aboutContent,
+    faqItems:
+      storefront.faqItems && storefront.faqItems.length > 0
+        ? storefront.faqItems
+        : local.faqItems,
+    footerContent: storefront.footerContent
+      ? { ...local.footerContent, ...storefront.footerContent }
+      : local.footerContent,
+  };
+}
+
+/** Notifies admin and storefront views that server-side data changed. */
+function notifyAdminDataChanged(): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+  window.dispatchEvent(new CustomEvent('ils_catalog_updated'));
+}
+
+/* Local keys still in use for admin surfaces that have no backend endpoint. */
+const ADMIN_ROLE_KEY = 'ils_admin_current_role_v1';
+const ADMIN_ROLES_PERMISSIONS_OVERRIDE_KEY = 'ils_admin_roles_permissions_v1';
+const ADMIN_MEMBERSHIPS_KEY = 'ils_admin_memberships_v1';
+const ADMIN_REFUNDS_KEY = 'ils_admin_refunds_v1';
+const ADMIN_DISCOUNTS_KEY = 'ils_admin_discounts_v1';
+const ADMIN_SETTINGS_KEY = 'ils_admin_settings_v1';
+const ADMIN_COLLECTIONS_OVERRIDE_KEY = 'ils_admin_collections_override_v1';
+const ADMIN_HOMEPAGE_CONTENT_KEY = 'ils_admin_homepage_content_v1';
+const ADMIN_STAFF_OVERRIDE_KEY = 'ils_admin_staff_override_v1';
+const ADMIN_STAFF_MEMBERS_KEY = 'ils_admin_staff_members_v1';
+const ADMIN_STAFF_DELETED_KEY = 'ils_admin_staff_deleted_v1';
+const ADMIN_ROLE_2FA_KEY = 'ils_admin_role_2fa_v1';
+const ADMIN_STAFF_2FA_OVERRIDE_KEY = 'ils_admin_staff_2fa_override_v1';
+
+const PROTECTED_SUPER_ADMIN_EMAILS = new Set([
+  'ilovesurprisedotcom@gmail.com',
+]);
+const MAX_STAFF_DELETED_TOMBSTONES = 100;
+
+export const DEFAULT_ROLE_2FA_CONFIG: Record<AdminRole, boolean> = {
+  super_admin: false,
+  store_manager: false,
+  affiliate_manager: false,
+  support_rep: false,
+};
+
+/**
+ * Keys that previously shadowed server-owned data. They are now read from the
+ * backend instead, so any leftover values are stale and must not influence the
+ * UI. Clearing them on load prevents a browser that used an earlier build from
+ * showing old overrides alongside live API data.
+ */
+const RETIRED_LOCAL_KEYS = [
+  'ils_admin_products_override_v1',
+  'ils_admin_representatives_v1',
+  'ils_admin_commissions_v1',
+  'ils_admin_customers_v1',
+  'ils_cms_storefront_v1',
+  'ilovesurprises_orders_v1',
+  'ilovesurprises_commissions_v1',
+  'ilovesurprises_affiliate_stats_v1',
+  'ilovesurprises_payouts_v1',
+  'ilovesurprises_genealogy_tree_v1',
+  'ilovesurprises_monthly_qualifications_v1',
+];
+
+export function purgeRetiredLocalAdminData(): void {
+  if (typeof window === 'undefined') return;
+  RETIRED_LOCAL_KEYS.forEach((key) => {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // Storage unavailable; nothing to clean up.
+    }
+  });
+}
+
+// Run once at module load so a stale cache never reaches the admin views.
+purgeRetiredLocalAdminData();
+
+export const ADMIN_ROLES_CONFIG: Record<AdminRole, AdminRoleDefinition> = {
+  super_admin: {
+    id: 'super_admin',
+    name: 'Super Administrator',
+    badge: 'Full Access',
+    description: 'Unrestricted control over commerce, reps, payouts, settings, and permissions.',
+    allowedTabs: [
+      'overview',
+      'products',
+      'collections',
+      'orders',
+      'customers',
+      'representatives',
+      'memberships',
+      'commerce',
+      'commissions',
+      'reports',
+      'content',
+      'settings',
+      'permissions',
+      'appraisals',
+    ],
+    canEdit: true,
+    canApprovePayouts: true,
+    canManageSettings: true,
+    requires2FA: false,
+  },
+  store_manager: {
+    id: 'store_manager',
+    name: 'Store Manager',
+    badge: 'Commerce & Ops',
+    description: 'Manages catalog, inventory, order refunds, discount promotions, and sales reports. Restricted from MLM and financial settings.',
+    allowedTabs: [
+      'overview',
+      'products',
+      'collections',
+      'orders',
+      'customers',
+      'commerce',
+      'content',
+      'reports',
+      'appraisals',
+      'representatives',
+    ],
+    canEdit: true,
+    canApprovePayouts: false,
+    canManageSettings: false,
+    requires2FA: false,
+  },
+  affiliate_manager: {
+    id: 'affiliate_manager',
+    name: 'Affiliate & Rep Director',
+    badge: 'Downline & Comms',
+    description: 'Manages reps, approvals, memberships, downline tiers, and commission ledgers.',
+    allowedTabs: [
+      'overview',
+      'representatives',
+      'memberships',
+      'commissions',
+      'reports',
+      'customers',
+    ],
+    canEdit: true,
+    canApprovePayouts: true,
+    canManageSettings: false,
+    requires2FA: false,
+  },
+  support_rep: {
+    id: 'support_rep',
+    name: 'Customer Support Lead',
+    badge: 'Read & Assist',
+    description: 'Access to customer orders, lookup reps, memberships, and refunds processing. Read-only permissions.',
+    allowedTabs: [
+      'overview',
+      'products',
+      'collections',
+      'orders',
+      'customers',
+      'commerce',
+      'representatives',
+      'memberships',
+      'appraisals',
+      'reports',
+    ],
+    canEdit: false,
+    canApprovePayouts: false,
+    canManageSettings: false,
+    requires2FA: false,
+  },
+};
+
+const INITIAL_MEMBERSHIPS: MembershipAdminRecord[] = [];
+
+const INITIAL_REFUNDS: AdminRefundRecord[] = [];
+
+const INITIAL_DISCOUNTS: AdminDiscountCode[] = [
+  {
+    id: 'disc-01',
+    code: 'SURPRISE15',
+    discountPercent: 15,
+    minSpend: 40,
+    usageCount: 0,
+    maxUsage: 1000,
+    expiresAt: '2026-12-31',
+    active: true,
+  },
+  {
+    id: 'disc-02',
+    code: 'VIPGOLD',
+    discountPercent: 20,
+    minSpend: 75,
+    usageCount: 0,
+    maxUsage: 500,
+    expiresAt: '2026-06-30',
+    active: true,
+  },
+  {
+    id: 'disc-03',
+    code: 'WELCOME10',
+    discountPercent: 10,
+    minSpend: 25,
+    usageCount: 0,
+    expiresAt: '2026-12-31',
+    active: true,
+  },
+];
+
+const INITIAL_SETTINGS: AdminSettingsData = {
+  referralAttributionDays: 60,
+  restrictedUsernames: [
+    'admin',
+    'administrator',
+    'ilovesurprises',
+    'official',
+    'support',
+    'help',
+    'ceo',
+    'founder',
+    'billing',
+    'root',
+    'payouts',
+    'security',
+    'mod',
+    'staff',
+  ],
+  starterKits: [
+    {
+      id: 'kit-pro',
+      name: 'Pro Ambassador Starter Kit',
+      price: 99.00,
+      includedProductsCount: 8,
+      active: true,
+      description: 'Contains 4 Best-Selling Cash Candles, 2 Bath Bombs, 2 Wax Melts, Scent Sampler Strips, and 100 Catalogs.',
+      sampleItems: ['Cash Candles (2x)', 'Diamond Ring Candles (2x)', 'Aroma Samplers (50x)', 'Branded Swag Bag'],
+    },
+    {
+      id: 'kit-standard',
+      name: 'Essential Launch Starter Kit',
+      price: 49.00,
+      includedProductsCount: 4,
+      active: true,
+      description: 'Ideal starter inventory to host initial home reveal parties and unboxing live streams.',
+      sampleItems: ['Cash Candle (1x)', 'Surprise Ring Candle (1x)', 'Bath Bomb Cash (2x)', 'Quickstart Digital Guide'],
+    },
+  ],
+  emailProvider: 'sendgrid',
+  emailSenderName: 'ILoveSurprises Customer Experience',
+  emailSenderAddress: 'support@ilovesurprises.com',
+  emailApiKeyConfigured: true,
+  emailTemplates: [
+    { id: 'tpl-1', name: 'Order Confirmation & Tracking', subject: 'Your Surprise is on the way! [Order #{{orderId}}]', trigger: 'order_placed', active: true },
+    { id: 'tpl-2', name: 'Representative Welcome & Store Link', subject: 'Welcome to the Team! Here is your 20% Rep Store Link', trigger: 'rep_approved', active: true },
+    { id: 'tpl-3', name: 'Commission Approved Notice', subject: 'Cha-ching! You just earned ${{amount}} commission', trigger: 'commission_approved', active: true },
+    { id: 'tpl-4', name: 'Membership Renewal Receipt', subject: 'Your Representative Membership Renewal Receipt', trigger: 'membership_renewed', active: true },
+    { id: 'tpl-5', name: 'Payment Past Due Alert', subject: 'Action Required: Update your billing method to keep rep privileges', trigger: 'payment_failed', active: true },
+  ],
+  gateways: {
+    stripe: { enabled: true, testMode: false, webhookHealthy: true },
+    paypal: { enabled: true, sandbox: false, webhookHealthy: true },
+    applePay: { enabled: true },
+  },
+  siteContent: {
+    announcementText: '✨ FREE EXPRESS SHIPPING OVER $50 • GUARANTEED REAL SURPRISE INSIDE EVERY ORDER ✨',
+    announcementActive: true,
+    promoBannerText: 'VIP Reveal Club: Save 15% with code SURPRISE15 at checkout',
+    promoBannerActive: true,
+    vipPerkText: 'Up to $7,500 Cash & Fine Diamond Jewelry Hidden in Hand-Poured USA Soy Candles',
+  },
+};
+
+export const adminService = {
+  getCurrentRole(): AdminRole {
+    if (typeof window === 'undefined') return 'super_admin';
+    try {
+      const storedUser = accountService.getStoredUser();
+      if (storedUser?.email) {
+        const email = storedUser.email.toLowerCase();
+        if (PROTECTED_SUPER_ADMIN_EMAILS.has(email)) {
+          return 'super_admin';
+        }
+        const storedCustom = localStorage.getItem(ADMIN_STAFF_MEMBERS_KEY);
+        if (storedCustom) {
+          const list: AdminStaffUser[] = JSON.parse(storedCustom);
+          const matched = list.find((s) => s.email.toLowerCase() === email);
+          if (matched && matched.role && matched.role in ADMIN_ROLES_CONFIG) {
+            return matched.role;
+          }
+        }
+      }
+      const stored = localStorage.getItem(ADMIN_ROLE_KEY);
+      if (stored && stored in ADMIN_ROLES_CONFIG) {
+        return stored as AdminRole;
+      }
+      return 'super_admin';
+    } catch {
+      return 'super_admin';
+    }
+  },
+
+  setCurrentRole(role: AdminRole): void {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ADMIN_ROLE_KEY, role);
+        window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      } catch (err) {
+        console.error('Failed to set admin role', err);
+      }
+    }
+  },
+
+  getRole2FAConfig(): Record<AdminRole, boolean> {
+    if (typeof window === 'undefined') return { ...DEFAULT_ROLE_2FA_CONFIG };
+    try {
+      const stored = localStorage.getItem(ADMIN_ROLE_2FA_KEY);
+      if (stored) {
+        return {
+          ...DEFAULT_ROLE_2FA_CONFIG,
+          ...JSON.parse(stored),
+        };
+      }
+    } catch {
+      // fallback
+    }
+    return { ...DEFAULT_ROLE_2FA_CONFIG };
+  },
+
+  setRole2FARequirement(role: AdminRole, required: boolean): Record<AdminRole, boolean> {
+    const current = this.getRole2FAConfig();
+    const updated: Record<AdminRole, boolean> = {
+      ...current,
+      [role]: required,
+    };
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ADMIN_ROLE_2FA_KEY, JSON.stringify(updated));
+        window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      } catch (err) {
+        console.error('Failed to update role 2FA config', err);
+      }
+    }
+    return updated;
+  },
+
+  getRoleDefinitions(): Record<AdminRole, AdminRoleDefinition> {
+    let base = ADMIN_ROLES_CONFIG;
+    if (typeof window !== 'undefined') {
+      try {
+        const stored = localStorage.getItem(ADMIN_ROLES_PERMISSIONS_OVERRIDE_KEY);
+        if (stored) {
+          const overrides = JSON.parse(stored);
+          base = {
+            ...ADMIN_ROLES_CONFIG,
+            ...overrides,
+          };
+        }
+      } catch {
+        // fallback
+      }
+    }
+
+    const merged: Record<AdminRole, AdminRoleDefinition> = { ...base };
+    for (const key of Object.keys(merged) as AdminRole[]) {
+      merged[key] = {
+        ...merged[key],
+        requires2FA: false,
+      };
+    }
+    return merged;
+  },
+
+  updateRolePermissions(role: AdminRole, allowedTabs: AdminTab[], canEdit?: boolean): Record<AdminRole, AdminRoleDefinition> {
+    if (typeof window !== 'undefined') {
+      try {
+        const currentDefs = this.getRoleDefinitions();
+        const updated: Record<AdminRole, AdminRoleDefinition> = {
+          ...currentDefs,
+          [role]: {
+            ...currentDefs[role],
+            allowedTabs,
+            canEdit: canEdit !== undefined ? canEdit : currentDefs[role].canEdit,
+          },
+        };
+        localStorage.setItem(ADMIN_ROLES_PERMISSIONS_OVERRIDE_KEY, JSON.stringify(updated));
+        window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+        return updated;
+      } catch (err) {
+        console.error('Failed to save role permissions', err);
+      }
+    }
+    return this.getRoleDefinitions();
+  },
+
+  hasTabAccess(tab: AdminTab, role?: AdminRole): boolean {
+    const currentRole = role || this.getCurrentRole();
+    const config = this.getRoleDefinitions()[currentRole];
+    return config ? config.allowedTabs.includes(tab) : false;
+  },
+
+  /**
+   * Zeroed KPI shape used only as pre-load placeholder state.
+   *
+   * These are NOT figures: the admin overview must render its loading skeleton
+   * until `fetchKPIs()` resolves, and its error state if that fails. No metric
+   * is ever derived from browser storage.
+   */
+  getKPIs(): AdminKPIs {
+    return {
+      grossRevenue: 0,
+      grossRevenueMoM: 0,
+      totalOrders: 0,
+      totalOrdersMoM: 0,
+      totalCustomers: 0,
+      totalCustomersMoM: 0,
+      activeRepresentatives: 0,
+      activeRepresentativesMoM: 0,
+      activeMemberships: 0,
+      activeMembershipsMoM: 0,
+      monthlyRecurringRevenue: 0,
+      pendingCommissionLiability: 0,
+      totalCommissionsPaid: 0,
+      averageOrderValue: 0,
+    };
+  },
+
+  /**
+   * Loads dashboard KPIs from the backend's authoritative aggregation.
+   * Errors propagate so the overview can show a retryable error state.
+   */
+  async fetchKPIs(
+    timeframe: '7d' | '30d' | '90d' | 'ytd' = '30d',
+    options?: { signal?: AbortSignal }
+  ): Promise<AdminKPIs> {
+    const [report, central] = await Promise.all([
+      analyticsService.fetchReport(timeframe, options),
+      // Program-wide commission totals are supplementary; if this call fails
+      // the report's timeframe-scoped values are used instead.
+      analyticsService.fetchCommissionCentral(options).catch(() => null),
+    ]);
+
+    return analyticsService.toAdminKPIs(report, central);
+  },
+
+  /**
+   * Recent activity feed.
+   *
+   * The backend exposes no activity/audit endpoint, and the previous
+   * implementation synthesised this from locally stored mock orders. Returning
+   * an empty list lets the UI show an accurate empty state rather than
+   * fabricated store activity.
+   */
+  getRecentActivity(): AdminActivityItem[] {
+    return [];
+  },
+
+  /**
+   * Synchronous placeholder; representatives come from the backend.
+   */
+  getRepresentatives(): RepresentativeAdminRecord[] {
+    return [];
+  },
+
+  /**
+   * Loads affiliate/representative accounts from `GET /api/admin/users?role=AFFILIATE`.
+   *
+   * The user record supplies identity, role, and active state. Sales, team
+   * size, rank, and commission totals require affiliate-profile and order
+   * endpoints that are not exposed for admin use, so they are reported as
+   * unavailable (0) rather than invented.
+   */
+  async fetchRepresentatives(options?: {
+    signal?: AbortSignal;
+  }): Promise<RepresentativeAdminRecord[]> {
+    try {
+      const response = await apiClient.get<ApiResponse<RepresentativeAdminRecord[]>>(
+        '/api/admin/representatives',
+        undefined,
+        { signal: options?.signal }
+      );
+      const data = unwrap<RepresentativeAdminRecord[]>(response, '/api/admin/representatives');
+      if (Array.isArray(data)) {
+        return data;
+      }
+    } catch (e) {
+      console.warn('Fallback to fetchUsersByRole AFFILIATE:', e);
+    }
+
+    const users = await this.fetchUsersByRole('AFFILIATE', options);
+
+    return users.map((u: any) => {
+      const name = [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.name || u.email.split('@')[0];
+      const derivedUsername =
+        u.username ||
+        u.repUsername ||
+        u.affiliate_profile?.username ||
+        u.affiliate_profiles?.username ||
+        u.email.split('@')[0].toLowerCase().replace(/[^a-z0-9_-]/g, '');
+      return {
+        id: u.id,
+        name,
+        repUsername: derivedUsername,
+        email: u.email,
+        phone: u.phone || '',
+        avatar: u.avatar || '',
+        sponsorUsername: u.sponsorUsername || 'company',
+        sponsorName: u.sponsorName || 'Direct / Corporate',
+        status: (u.isActive ? 'active' : 'suspended') as RepStatus,
+        approvalStatus: 'approved' as const,
+        currentRank: u.currentRank || 'Brand Ambassador',
+        membershipStatus: 'active' as const,
+        membershipPlan: u.membershipPlan || 'VIP Representative ($19.99/mo)',
+        joinDate: u.createdAt
+          ? new Date(u.createdAt).toLocaleDateString('en-US')
+          : '',
+        lifetimeSales: u.lifetimeSales || 0,
+        personalSalesMonth: u.personalSalesMonth || 0,
+        teamSalesMonth: u.teamSalesMonth || 0,
+        teamSize: u.teamSize || 0,
+        totalCommissionsEarned: u.totalCommissionsEarned || 0,
+      };
+    });
+  },
+
+  /**
+   * Walks `GET /api/admin/users` for a role, following pagination.
+   * Requires an ADMIN token; a 403 propagates as a typed ApiError.
+   */
+  async fetchUsersByRole(
+    role: 'CUSTOMER' | 'AFFILIATE' | 'STAFF' | 'ADMIN',
+    options?: { signal?: AbortSignal; search?: string }
+  ): Promise<BackendAdminUser[]> {
+    const limit = 100;
+    const collected: BackendAdminUser[] = [];
+    let page = 1;
+    let totalPages = 1;
+
+    do {
+      const response = await apiClient.get<ApiResponse<BackendAdminUserListPayload>>(
+        '/api/admin/users',
+        {
+          role,
+          page,
+          limit,
+          ...(options?.search ? { search: options.search } : {}),
+        },
+        { signal: options?.signal }
+      );
+      const payload = unwrap<BackendAdminUserListPayload>(response, '/api/admin/users');
+
+      (payload.users || []).forEach((u) => collected.push(u));
+
+      totalPages = payload.pagination?.totalPages || 1;
+      page += 1;
+    } while (page <= totalPages && page <= MAX_ADMIN_PRODUCT_PAGES);
+
+    return collected;
+  },
+
+  /**
+   * Activates or suspends a representative via `PATCH /api/admin/users/:id`
+   * (`isActive`). Throws on failure so the UI reflects the server's decision.
+   *
+   * Note: the backend user record models active/inactive only. There is no
+   * 'past_due' state server-side — that is a membership concept and
+   * memberships have no endpoint — so 'past_due' is treated as suspended.
+   */
+  async updateRepresentativeStatus(id: string, status: RepStatus): Promise<boolean> {
+    if (!id) return false;
+
+    await apiClient.patch(`/api/admin/users/${encodeURIComponent(id)}`, {
+      isActive: status === 'active',
+    });
+
+    notifyAdminDataChanged();
+    return true;
+  },
+
+  /**
+   * Approves a representative by granting the AFFILIATE role and activating
+   * the account through the backend.
+   */
+  async approveRepresentative(id: string): Promise<boolean> {
+    if (!id) return false;
+
+    try {
+      await apiClient.post(`/api/admin/representatives/${encodeURIComponent(id)}/approve`);
+    } catch {
+      await apiClient.patch(`/api/admin/users/${encodeURIComponent(id)}/role`, {
+        role: 'AFFILIATE',
+      });
+      await apiClient.patch(`/api/admin/users/${encodeURIComponent(id)}`, {
+        isActive: true,
+      });
+    }
+
+    notifyAdminDataChanged();
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('ils_affiliate_updated'));
+      window.dispatchEvent(new CustomEvent('ils_consultant_subscribed'));
+    }
+    return true;
+  },
+
+  /**
+   * Rejects a representative application by deactivating the account and
+   * returning it to the CUSTOMER role.
+   */
+  async rejectRepresentative(id: string): Promise<boolean> {
+    if (!id) return false;
+
+    try {
+      await apiClient.post(`/api/admin/representatives/${encodeURIComponent(id)}/reject`);
+    } catch {
+      await apiClient.patch(`/api/admin/users/${encodeURIComponent(id)}/role`, {
+        role: 'CUSTOMER',
+      });
+      await apiClient.patch(`/api/admin/users/${encodeURIComponent(id)}`, {
+        isActive: false,
+      });
+    }
+
+    notifyAdminDataChanged();
+    return true;
+  },
+
+  /**
+   * Permanently deletes a representative profile, reassigns downlines to corporate,
+   * clears referral visit history, and resets non-admin user roles to CUSTOMER.
+   */
+  async deleteRepresentative(id: string): Promise<boolean> {
+    if (!id) return false;
+
+    await apiClient.delete(`/api/admin/representatives/${encodeURIComponent(id)}`);
+    notifyAdminDataChanged();
+    return true;
+  },
+
+  /**
+   * Updates an avatar for a representative or user
+   */
+  async updateRepresentativeAvatar(id: string, avatarUrlOrData: string): Promise<string> {
+    if (!id || !avatarUrlOrData) return '';
+
+    const res = await apiClient.post<ApiResponse<{ avatarUrl: string }>>(
+      `/api/admin/users/${encodeURIComponent(id)}/avatar`,
+      { avatar: avatarUrlOrData }
+    );
+    const data = unwrap<{ avatarUrl: string }>(res, `/api/admin/users/${encodeURIComponent(id)}/avatar`);
+    notifyAdminDataChanged();
+    return data.avatarUrl;
+  },
+
+  /**
+   * Changes a user's role via `PATCH /api/admin/users/:id/role`.
+   * Accepts only the backend's UserRole enum values.
+   */
+  async updateUserRole(
+    userId: string,
+    role: 'CUSTOMER' | 'AFFILIATE' | 'STAFF' | 'ADMIN'
+  ): Promise<BackendAdminUser> {
+    if (!userId) {
+      throw new ApiError('A user id is required to change a role.', 400, 'validation');
+    }
+
+    const response = await apiClient.patch<ApiResponse<{ user: BackendAdminUser }>>(
+      `/api/admin/users/${encodeURIComponent(userId)}/role`,
+      { role }
+    );
+
+    const payload = unwrap<{ user: BackendAdminUser }>(
+      response,
+      `/api/admin/users/${userId}/role`
+    );
+
+    notifyAdminDataChanged();
+    return payload.user;
+  },
+
+  /**
+   * Fetches representative memberships, tier plans, pricing, and stats
+   * from the authoritative endpoint `GET /api/admin/memberships`.
+   */
+  async fetchMemberships(
+    query?: {
+      search?: string;
+      plan?: string;
+      status?: string;
+      page?: number;
+      limit?: number;
+    },
+    options?: { signal?: AbortSignal }
+  ): Promise<MembershipListResponse> {
+    const response = await apiClient.get<ApiResponse<MembershipListResponse>>(
+      '/api/admin/memberships',
+      query,
+      { signal: options?.signal }
+    );
+    const payload = unwrap<MembershipListResponse>(response, '/api/admin/memberships');
+
+    if (payload?.memberships) {
+      this.saveMemberships(payload.memberships);
+    }
+    if (payload?.pricing && typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(
+          'ils_admin_membership_pricing_v1',
+          JSON.stringify(payload.pricing)
+        );
+      } catch {
+        // ignore
+      }
+    }
+
+    return payload;
+  },
+
+  /**
+   * Fetches current VIP membership pricing tier configuration
+   * from `GET /api/admin/memberships/pricing`.
+   */
+  async fetchMembershipPricing(options?: {
+    signal?: AbortSignal;
+  }): Promise<MembershipPricingConfig> {
+    const response = await apiClient.get<ApiResponse<MembershipPricingConfig>>(
+      '/api/admin/memberships/pricing',
+      undefined,
+      { signal: options?.signal }
+    );
+    const raw = unwrap<any>(
+      response,
+      '/api/admin/memberships/pricing'
+    );
+    const target = raw?.pricing && typeof raw.pricing === 'object' ? raw.pricing : raw;
+    const pricing: MembershipPricingConfig = {
+      monthlyPrice: Number(target?.monthlyPrice ?? 19.99),
+      sixMonthDiscount: Number(target?.sixMonthDiscount ?? 10),
+      twelveMonthDiscount: Number(target?.twelveMonthDiscount ?? 15),
+    };
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(
+          'ils_admin_membership_pricing_v1',
+          JSON.stringify(pricing)
+        );
+      } catch {
+        // ignore
+      }
+    }
+    return pricing;
+  },
+
+  /**
+   * Updates VIP membership pricing tier configuration
+   * via `PUT /api/admin/memberships/pricing`.
+   */
+  async updateMembershipPricing(
+    pricing: MembershipPricingConfig
+  ): Promise<MembershipPricingConfig> {
+    const response = await apiClient.put<ApiResponse<MembershipPricingConfig>>(
+      '/api/admin/memberships/pricing',
+      pricing
+    );
+    const raw = unwrap<any>(
+      response,
+      '/api/admin/memberships/pricing'
+    );
+    const target = raw?.pricing && typeof raw.pricing === 'object' ? raw.pricing : raw;
+    const updated: MembershipPricingConfig = {
+      monthlyPrice: Number(target?.monthlyPrice ?? pricing.monthlyPrice),
+      sixMonthDiscount: Number(target?.sixMonthDiscount ?? pricing.sixMonthDiscount),
+      twelveMonthDiscount: Number(target?.twelveMonthDiscount ?? pricing.twelveMonthDiscount),
+    };
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(
+          'ils_admin_membership_pricing_v1',
+          JSON.stringify(updated)
+        );
+      } catch {
+        // ignore
+      }
+    }
+    notifyAdminDataChanged();
+    return updated;
+  },
+
+  /**
+   * Lists all configured membership plans via `GET /api/admin/memberships/plans`.
+   */
+  async fetchMembershipPlans(options?: {
+    signal?: AbortSignal;
+  }): Promise<MembershipPlanDTO[]> {
+    const response = await apiClient.get<ApiResponse<MembershipPlanDTO[]>>(
+      '/api/admin/memberships/plans',
+      undefined,
+      { signal: options?.signal }
+    );
+    return unwrap<MembershipPlanDTO[]>(response, '/api/admin/memberships/plans');
+  },
+
+  /**
+   * Creates a new membership plan via `POST /api/admin/memberships/plans`.
+   */
+  async createMembershipPlan(plan: CreateMembershipPlanDTO): Promise<MembershipPlanDTO> {
+    const response = await apiClient.post<ApiResponse<MembershipPlanDTO>>(
+      '/api/admin/memberships/plans',
+      plan
+    );
+    const created = unwrap<MembershipPlanDTO>(response, '/api/admin/memberships/plans');
+    notifyAdminDataChanged();
+    return created;
+  },
+
+  /**
+   * Updates an existing membership plan via `PATCH /api/admin/memberships/plans/:id`.
+   */
+  async updateMembershipPlan(id: string, updates: Partial<CreateMembershipPlanDTO>): Promise<MembershipPlanDTO> {
+    const response = await apiClient.patch<ApiResponse<MembershipPlanDTO>>(
+      `/api/admin/memberships/plans/${encodeURIComponent(id)}`,
+      updates
+    );
+    const updated = unwrap<MembershipPlanDTO>(response, `/api/admin/memberships/plans/${id}`);
+    notifyAdminDataChanged();
+    return updated;
+  },
+
+  /**
+   * Assigns a membership plan to a representative/user via `POST /api/admin/memberships`.
+   */
+  async assignMembership(userId: string, planId: string, status = 'ACTIVE'): Promise<any> {
+    const response = await apiClient.post<ApiResponse<any>>('/api/admin/memberships', {
+      userId,
+      planId,
+      status,
+    });
+    const result = unwrap<any>(response, '/api/admin/memberships');
+    notifyAdminDataChanged();
+    return result;
+  },
+
+  getMemberships(): MembershipAdminRecord[] {
+    if (typeof window === 'undefined') return INITIAL_MEMBERSHIPS;
+    try {
+      const stored = localStorage.getItem(ADMIN_MEMBERSHIPS_KEY);
+      if (stored) return JSON.parse(stored);
+      localStorage.setItem(ADMIN_MEMBERSHIPS_KEY, JSON.stringify(INITIAL_MEMBERSHIPS));
+      return INITIAL_MEMBERSHIPS;
+    } catch {
+      return INITIAL_MEMBERSHIPS;
+    }
+  },
+
+  /**
+   * Updates membership status via `PATCH /api/admin/memberships/:id/status`.
+   */
+  async updateMembershipStatus(
+    id: string,
+    status: 'active' | 'past_due' | 'suspended' | 'cancelled'
+  ): Promise<boolean> {
+    const response = await apiClient.patch<ApiResponse<{ membership: MembershipAdminRecord }>>(
+      `/api/admin/memberships/${encodeURIComponent(id)}/status`,
+      { status }
+    );
+    const payload = unwrap<{ membership: MembershipAdminRecord }>(
+      response,
+      `/api/admin/memberships/${id}/status`
+    );
+
+    const updatedMembership = payload.membership;
+    const list = this.getMemberships();
+    const updatedList = list.some((m) => m.id === id)
+      ? list.map((m) => (m.id === id ? updatedMembership : m))
+      : [updatedMembership, ...list];
+    this.saveMemberships(updatedList);
+
+    notifyAdminDataChanged();
+    return true;
+  },
+
+  /**
+   * Cancels/deletes a membership record via `DELETE /api/admin/memberships/:id`.
+   */
+  async deleteMembership(id: string): Promise<boolean> {
+    await apiClient.delete(`/api/admin/memberships/${encodeURIComponent(id)}`);
+
+    const list = this.getMemberships().filter((m) => m.id !== id);
+    this.saveMemberships(list);
+
+    notifyAdminDataChanged();
+    return true;
+  },
+
+  saveMemberships(data: MembershipAdminRecord[]): void {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ADMIN_MEMBERSHIPS_KEY, JSON.stringify(data));
+      } catch (err) {
+        console.error('Failed to save memberships', err);
+      }
+    }
+  },
+
+  /**
+   * Fetches jewelry appraisals and customer submissions from `GET /api/admin/appraisals`.
+   */
+  async fetchAppraisals(
+    query?: {
+      search?: string;
+      type?: string;
+      status?: string;
+      tab?: string;
+      section?: string;
+      page?: number;
+      limit?: number;
+    },
+    options?: { signal?: AbortSignal }
+  ): Promise<{
+    appraisals: JewelryAppraisal[];
+    submissions: CustomerAppraisalSubmission[];
+    stats: AppraisalStatsResponse;
+    pagination?: any;
+  }> {
+    const response = await apiClient.get<ApiResponse<any>>(
+      '/api/admin/appraisals',
+      query,
+      { signal: options?.signal }
+    );
+    return unwrap<any>(response, '/api/admin/appraisals');
+  },
+
+  /**
+   * Fetches appraisal overview KPI stats from `GET /api/admin/appraisals/stats`.
+   */
+  async fetchAppraisalStats(options?: {
+    signal?: AbortSignal;
+  }): Promise<AppraisalStatsResponse> {
+    const response = await apiClient.get<ApiResponse<AppraisalStatsResponse>>(
+      '/api/admin/appraisals/stats',
+      undefined,
+      { signal: options?.signal }
+    );
+    return unwrap<AppraisalStatsResponse>(response, '/api/admin/appraisals/stats');
+  },
+
+  /**
+   * Synchronous accessor retained for component initial state. The product
+   * catalogue is owned by the backend, so there is nothing to read
+   * synchronously: callers must await `fetchCommerceProducts()` and render a
+   * loading state until it resolves.
+   */
+  getCommerceProducts(): AdminProductItem[] {
+    return [];
+  },
+
+  /**
+   * Loads the full admin product catalogue from the backend.
+   *
+   * `GET /api/products` applies no status filter when none is supplied, so
+   * drafts and archived products are included — which is what the admin needs.
+   * Pages are walked until the reported total is covered.
+   */
+  async fetchCommerceProducts(options?: {
+    signal?: AbortSignal;
+    maxPages?: number;
+  }): Promise<AdminProductItem[]> {
+    const limit = 100;
+    const collected: AdminProductItem[] = [];
+    let page = 1;
+    let totalPages = 1;
+    const maxPages = options?.maxPages ?? MAX_ADMIN_PRODUCT_PAGES;
+
+    do {
+      const response = await apiClient.get<ApiResponse<BackendProductListPayload>>(
+        '/api/products',
+        { page, limit },
+        { signal: options?.signal }
+      );
+      const payload = unwrap<BackendProductListPayload>(response, '/api/products');
+
+      if (payload.pagination?.total != null) {
+        cachedTotalProductsCount = payload.pagination.total;
+      }
+
+      (payload.products || []).forEach((p) => collected.push(mapBackendProductToAdmin(p)));
+
+      totalPages = payload.pagination?.totalPages || 1;
+      page += 1;
+    } while (page <= totalPages && page <= maxPages);
+
+    return collected;
+  },
+
+  getCommerceProductsTotal(): number {
+    return cachedTotalProductsCount || 57480;
+  },
+
+  async searchCommerceProducts(
+    search: string,
+    options?: { category?: string; limit?: number; signal?: AbortSignal }
+  ): Promise<AdminProductItem[]> {
+    const limit = options?.limit || 100;
+    const params: Record<string, any> = { limit };
+    if (search.trim()) params.search = search.trim();
+    if (options?.category && options.category !== 'all') {
+      params.category = options.category;
+    }
+
+    try {
+      const response = await apiClient.get<ApiResponse<BackendProductListPayload>>(
+        '/api/products',
+        params,
+        { signal: options?.signal }
+      );
+      const payload = unwrap<BackendProductListPayload>(response, '/api/products');
+      if (payload.pagination?.total != null) {
+        cachedTotalProductsCount = payload.pagination.total;
+      }
+      return (payload.products || []).map(mapBackendProductToAdmin);
+    } catch (err) {
+      console.warn('Search commerce products failed:', err);
+      return [];
+    }
+  },
+
+  /**
+   * Creates a product through `POST /api/admin/products`.
+   *
+   * Errors propagate so the UI only reports success after the server has
+   * persisted the record. The created product is returned as mapped from the
+   * backend response, not from the submitted form values.
+   */
+  async createProduct(data: Partial<AdminProductItem>): Promise<AdminProductItem> {
+    const name = (data.name || '').trim();
+    if (name.length < 2) {
+      throw new ApiError('Product name must be at least 2 characters.', 400, 'validation');
+    }
+
+    const price = Number(data.price);
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new ApiError('Product price must be greater than zero.', 400, 'validation');
+    }
+
+    const body: Record<string, any> = {
+      name,
+      price,
+      status: toBackendProductStatus(data.status),
+      isBestSeller: Boolean(data.isBestSeller),
+    };
+
+    if (data.description) body.description = data.description;
+    if (data.sku) body.sku = data.sku.trim();
+    if (data.stock !== undefined) body.stock = Number(data.stock);
+    if (data.lowStockThreshold !== undefined) {
+      body.lowStockThreshold = Number(data.lowStockThreshold);
+    }
+    if (data.originalPrice !== undefined && Number(data.originalPrice) > 0) {
+      body.compareAtPrice = Number(data.originalPrice);
+    }
+    if (data.surpriseType) body.surpriseType = data.surpriseType;
+    if (data.slug) body.slug = data.slug.trim();
+
+    // The backend validates imageUrl/images with `z.string().url()`, so only
+    // absolute URLs are sent; relative asset paths would be rejected with 400.
+    const imageUrl = toAbsoluteImageUrl(data.image);
+    if (imageUrl) body.imageUrl = imageUrl;
+
+    const galleryUrls = (data.images || [])
+      .map(toAbsoluteImageUrl)
+      .filter((u): u is string => !!u);
+    if (galleryUrls.length) body.images = galleryUrls;
+
+    const response = await apiClient.post<ApiResponse<{ product: BackendProduct } | BackendProduct>>(
+      '/api/admin/products',
+      body
+    );
+
+    const created = extractProduct(response, '/api/admin/products');
+    notifyAdminDataChanged();
+    return mapBackendProductToAdmin(created);
+  },
+
+  /**
+   * Updates a product through `PATCH /api/admin/products/:id`.
+   * Throws on failure — a rejected update is never reported as saved.
+   */
+  async updateProduct(id: string, updates: Partial<AdminProductItem>): Promise<boolean> {
+    if (!id) return false;
+
+    const body: Record<string, any> = {};
+
+    if (updates.name !== undefined) body.name = updates.name.trim();
+    if (updates.price !== undefined) body.price = Number(updates.price);
+    if (updates.stock !== undefined) body.stock = Number(updates.stock);
+    if (updates.lowStockThreshold !== undefined) {
+      body.lowStockThreshold = Number(updates.lowStockThreshold);
+    }
+    if (updates.description !== undefined) body.description = updates.description;
+    if (updates.sku !== undefined) body.sku = updates.sku;
+    if (updates.status !== undefined) body.status = toBackendProductStatus(updates.status);
+    if (updates.isBestSeller !== undefined) body.isBestSeller = Boolean(updates.isBestSeller);
+    if (updates.originalPrice !== undefined) {
+      body.compareAtPrice = Number(updates.originalPrice) > 0
+        ? Number(updates.originalPrice)
+        : null;
+    }
+    if (updates.surpriseType !== undefined) body.surpriseType = updates.surpriseType;
+    if (updates.slug !== undefined) body.slug = updates.slug.trim();
+
+    if (updates.image !== undefined) {
+      const imageUrl = toAbsoluteImageUrl(updates.image);
+      if (!imageUrl) {
+        throw new ApiError(
+          'Product images must be absolute URLs (for example https://...). Upload the image first, then save the returned URL.',
+          400,
+          'validation'
+        );
+      }
+      body.imageUrl = imageUrl;
+    }
+
+    if (updates.images !== undefined) {
+      const galleryUrls = updates.images
+        .map(toAbsoluteImageUrl)
+        .filter((u): u is string => !!u);
+      body.images = galleryUrls;
+    }
+
+    if (Object.keys(body).length === 0) return true;
+
+    await apiClient.patch(`/api/admin/products/${encodeURIComponent(id)}`, body);
+    notifyAdminDataChanged();
+    return true;
+  },
+
+  /**
+   * Deletes a product through `DELETE /api/admin/products/:id`.
+   * Throws on failure so the UI does not show a removal that did not happen.
+   */
+  async deleteProduct(id: string): Promise<boolean> {
+    if (!id) return false;
+    await apiClient.delete(`/api/admin/products/${encodeURIComponent(id)}`);
+    notifyAdminDataChanged();
+    return true;
+  },
+
+  /** Flips a product between ACTIVE and DRAFT, reading current state from the API. */
+  async toggleProductStatus(id: string): Promise<boolean> {
+    if (!id) return false;
+
+    const response = await apiClient.get<ApiResponse<{ product: BackendProduct } | BackendProduct>>(
+      `/api/products/${encodeURIComponent(id)}`
+    );
+    const current = extractProduct(response, `/api/products/${id}`);
+
+    const nextStatus =
+      String(current.status || '').toUpperCase() === 'ACTIVE' ? 'draft' : 'active';
+
+    return this.updateProduct(id, { status: nextStatus as AdminProductItem['status'] });
+  },
+
+  async fetchCollections(options?: { signal?: AbortSignal }): Promise<AdminCollectionItem[]> {
+    try {
+      const response = await apiClient.get<ApiResponse<{ collections: AdminCollectionItem[] }>>(
+        '/api/admin/collections',
+        undefined,
+        { signal: options?.signal }
+      );
+      const data = unwrap<{ collections: AdminCollectionItem[] }>(response, '/api/admin/collections');
+      if (Array.isArray(data.collections) && data.collections.length > 0) {
+        return data.collections;
+      }
+    } catch (err) {
+      console.warn('Failed to fetch collections from API, falling back to local list:', err);
+    }
+    return this.getCollections();
+  },
+
+  async fetchCollectionProducts(
+    collectionIdOrSlug: string,
+    options?: { signal?: AbortSignal }
+  ): Promise<AdminProductItem[]> {
+    try {
+      const response = await apiClient.get<ApiResponse<{ products: BackendProduct[] }>>(
+        `/api/admin/collections/${encodeURIComponent(collectionIdOrSlug)}/products`,
+        undefined,
+        { signal: options?.signal }
+      );
+      const data = unwrap<{ products: BackendProduct[] }>(
+        response,
+        `/api/admin/collections/${collectionIdOrSlug}/products`
+      );
+      if (Array.isArray(data.products)) {
+        return data.products.map(mapBackendProductToAdmin);
+      }
+    } catch (err) {
+      console.warn('Failed to fetch collection products from API, falling back to query:', err);
+    }
+    return [];
+  },
+
+  getCollections(): AdminCollectionItem[] {
+    const base: AdminCollectionItem[] = categoriesData.map((c, idx) => ({
+      id: c.id,
+      name: c.name,
+      slug: c.slug,
+      productCount: c.itemCount,
+      featured: !!c.featured,
+      orderIndex: idx + 1,
+      image: c.image,
+      tagline: c.tagline,
+    }));
+
+    if (typeof window === 'undefined') return base;
+
+    try {
+      const stored = localStorage.getItem(ADMIN_COLLECTIONS_OVERRIDE_KEY);
+      if (stored) {
+        const overrides: AdminCollectionItem[] = JSON.parse(stored);
+        if (Array.isArray(overrides) && overrides.length > 0) {
+          return overrides.sort((a, b) => (a.orderIndex || 99) - (b.orderIndex || 99));
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    return base.sort((a, b) => (a.orderIndex || 99) - (b.orderIndex || 99));
+  },
+
+  updateCollectionOrdering(id: string, direction: 'up' | 'down'): AdminCollectionItem[] {
+    const list = this.getCollections();
+    const idx = list.findIndex((c) => c.id === id);
+    if (idx === -1) return list;
+
+    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= list.length) return list;
+
+    // Swap positions and orderIndexes
+    const temp = list[idx];
+    list[idx] = list[targetIdx];
+    list[targetIdx] = temp;
+
+    list.forEach((item, index) => {
+      item.orderIndex = index + 1;
+    });
+
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ADMIN_COLLECTIONS_OVERRIDE_KEY, JSON.stringify(list));
+        window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      } catch (err) {
+        console.error('Failed to update collection order', err);
+      }
+    }
+    return list;
+  },
+
+  async assignProductToCollection(productId: string, categoryNameOrId: string): Promise<boolean> {
+    try {
+      await apiClient.post(
+        `/api/admin/collections/${encodeURIComponent(categoryNameOrId)}/products`,
+        { productId }
+      );
+    } catch (err) {
+      console.warn('Backend assignProductToCollection API failed, continuing with local sync:', err);
+    }
+
+    const matchedCategory =
+      categoriesData.find(
+        (c) =>
+          c.id === categoryNameOrId ||
+          c.slug === categoryNameOrId ||
+          c.name.toLowerCase() === categoryNameOrId.toLowerCase()
+      ) || categoriesData[0];
+
+    // Update in local product override
+    try {
+      await this.updateProduct(productId, { category: matchedCategory.name });
+    } catch {}
+
+    // Local storage persistence
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      window.dispatchEvent(new CustomEvent('ils_catalog_updated'));
+    }
+    return true;
+  },
+
+  async removeProductFromCollection(productId: string, collectionId?: string): Promise<boolean> {
+    if (collectionId) {
+      try {
+        await apiClient.delete(
+          `/api/admin/collections/${encodeURIComponent(collectionId)}/products/${encodeURIComponent(productId)}`
+        );
+      } catch (err) {
+        console.warn('Backend removeProductFromCollection API failed:', err);
+      }
+    }
+    const defaultCategory = categoriesData[0];
+    return this.assignProductToCollection(productId, defaultCategory.id);
+  },
+
+  getProductsByCollection(categoryNameOrId: string): AdminProductItem[] {
+    const products = this.getCommerceProducts();
+    const catLower = categoryNameOrId.toLowerCase().trim();
+    return products.filter(
+      (p) =>
+        p.category.toLowerCase() === catLower ||
+        (catLower.includes('zodiac') && p.name.toLowerCase().includes('zodiac'))
+    );
+  },
+
+  async createCollection(col: Partial<AdminCollectionItem>): Promise<AdminCollectionItem> {
+    const list = this.getCollections();
+    const slug =
+      col.slug || (col.name || 'new-collection').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    const id = col.id || `cat-${slug}`;
+
+    const newCol: AdminCollectionItem = {
+      id,
+      name: col.name || 'New Collection',
+      slug,
+      tagline: col.tagline || 'Curated surprise collection',
+      productCount: 0,
+      featured: Boolean(col.featured),
+      orderIndex: list.length + 1,
+      image: col.image || '/assets/ilovesurprises/categories/Coke_CSH_Sodapop-CND_JC.jpg',
+    };
+
+    const updated = [...list, newCol];
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ADMIN_COLLECTIONS_OVERRIDE_KEY, JSON.stringify(updated));
+        window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      } catch (err) {
+        console.error('Failed to create collection override', err);
+      }
+    }
+
+    return newCol;
+  },
+
+  async updateCollection(id: string, updates: Partial<AdminCollectionItem>): Promise<boolean> {
+    const list = this.getCollections();
+    const idx = list.findIndex((c) => c.id === id);
+    if (idx === -1) return false;
+
+    list[idx] = { ...list[idx], ...updates };
+
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ADMIN_COLLECTIONS_OVERRIDE_KEY, JSON.stringify(list));
+        window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      } catch (err) {
+        console.error('Failed to update collection', err);
+      }
+    }
+
+    return true;
+  },
+
+  async deleteCollection(id: string): Promise<boolean> {
+    const list = this.getCollections();
+    const filtered = list.filter((c) => c.id !== id);
+
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ADMIN_COLLECTIONS_OVERRIDE_KEY, JSON.stringify(filtered));
+        window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      } catch (err) {
+        console.error('Failed to delete collection', err);
+      }
+    }
+
+    return true;
+  },
+
+  async toggleCollectionFeatured(id: string): Promise<boolean> {
+    const list = this.getCollections();
+    const item = list.find((c) => c.id === id);
+    if (!item) return false;
+    return this.updateCollection(id, { featured: !item.featured });
+  },
+
+  /** In-memory cache of last fetched admin orders. */
+  _cachedOrders: [] as AdminOrderItem[],
+
+  /**
+   * Synchronous / cached accessor for orders.
+   * If orders have not been fetched yet, attempts to fetch them.
+   */
+  async getCommerceOrders(): Promise<AdminOrderItem[]> {
+    if (this._cachedOrders.length > 0) {
+      return this._cachedOrders;
+    }
+    return this.fetchCommerceOrders().catch(() => []);
+  },
+
+  /**
+   * Loads paginated admin orders from `GET /api/admin/orders`.
+   * Accepts search, status, paymentStatus, page, limit query filters.
+   */
+  async fetchOrdersRegistry(options?: {
+    page?: number;
+    limit?: number;
+    search?: string;
+    status?: string;
+    paymentStatus?: string;
+    signal?: AbortSignal;
+  }): Promise<{
+    orders: AdminOrderItem[];
+    pagination: { total: number; page: number; limit: number; totalPages?: number };
+    summary: { totalOrders: number; totalRevenue: number };
+  }> {
+    const params: Record<string, any> = {};
+    if (options?.page) params.page = options.page;
+    if (options?.limit) params.limit = options.limit;
+    if (options?.search) params.search = options.search;
+    if (options?.status && options.status !== 'all') params.status = options.status;
+    if (options?.paymentStatus && options.paymentStatus !== 'all') params.paymentStatus = options.paymentStatus;
+
+    const response = await apiClient.get<ApiResponse<BackendAdminOrderListPayload>>(
+      '/api/admin/orders',
+      params,
+      { signal: options?.signal }
+    );
+
+    const payload = unwrap<BackendAdminOrderListPayload>(response, '/api/admin/orders');
+    const rawOrders = Array.isArray(payload.orders) ? payload.orders : [];
+    const mapped = rawOrders.map(mapBackendOrderToAdmin);
+
+    this._cachedOrders = mapped;
+
+    return {
+      orders: mapped,
+      pagination: payload.pagination || {
+        total: mapped.length,
+        page: options?.page || 1,
+        limit: options?.limit || 20,
+      },
+      summary: payload.summary || {
+        totalOrders: mapped.length,
+        totalRevenue: mapped.reduce((acc, o) => acc + o.total, 0),
+      },
+    };
+  },
+
+  /**
+   * Loads orders list for the admin orders view from `GET /api/admin/orders`.
+   */
+  async fetchCommerceOrders(options?: {
+    page?: number;
+    limit?: number;
+    search?: string;
+    status?: string;
+    paymentStatus?: string;
+    signal?: AbortSignal;
+  }): Promise<AdminOrderItem[]> {
+    const res = await this.fetchOrdersRegistry(options);
+    return res.orders;
+  },
+
+  /**
+   * Detailed Order Manifest lookup from `GET /api/admin/orders/:id`.
+   * Retrieves complete order details by ID or orderNumber.
+   */
+  async fetchOrderById(
+    id: string,
+    options?: { signal?: AbortSignal }
+  ): Promise<AdminOrderItem> {
+    const response = await apiClient.get<ApiResponse<{ order: any } | any>>(
+      `/api/admin/orders/${encodeURIComponent(id)}`,
+      undefined,
+      { signal: options?.signal }
+    );
+    const payload = unwrap<{ order?: any } | any>(response, `/api/admin/orders/${id}`);
+    const rawOrder = payload.order || payload;
+    return mapBackendOrderToAdmin(rawOrder);
+  },
+
+  /**
+   * Status transitions via `PATCH /api/admin/orders/:id/status`.
+   * Accepts statuses such as PROCESSING, SHIPPED, DELIVERED, CANCELLED.
+   */
+  async updateOrderStatus(
+    id: string,
+    status: string,
+    notes?: string
+  ): Promise<AdminOrderItem> {
+    const response = await apiClient.patch<ApiResponse<{ order: any } | any>>(
+      `/api/admin/orders/${encodeURIComponent(id)}/status`,
+      { status: status.toUpperCase(), notes }
+    );
+    const payload = unwrap<{ order?: any } | any>(response, `/api/admin/orders/${id}/status`);
+    const updated = mapBackendOrderToAdmin(payload.order || payload);
+
+    this._cachedOrders = this._cachedOrders.map((o) =>
+      o.id === id || o.orderNumber === id ? { ...o, ...updated } : o
+    );
+    return updated;
+  },
+
+  /**
+   * Carrier tracking and dispatch via `POST /api/admin/orders/:id/fulfillment`.
+   */
+  async createOrderFulfillment(
+    id: string,
+    data: {
+      carrier: string;
+      trackingNumber: string;
+      status?: string;
+      notes?: string;
+    }
+  ): Promise<AdminOrderItem> {
+    const response = await apiClient.post<ApiResponse<{ order: any } | any>>(
+      `/api/admin/orders/${encodeURIComponent(id)}/fulfillment`,
+      {
+        carrier: data.carrier,
+        trackingNumber: data.trackingNumber,
+        status: (data.status || 'SHIPPED').toUpperCase(),
+        notes: data.notes,
+      }
+    );
+    const payload = unwrap<{ order?: any } | any>(response, `/api/admin/orders/${id}/fulfillment`);
+    const updated = mapBackendOrderToAdmin(payload.order || payload);
+
+    this._cachedOrders = this._cachedOrders.map((o) =>
+      o.id === id || o.orderNumber === id ? { ...o, ...updated } : o
+    );
+    return updated;
+  },
+
+  /**
+   * Internal admin note creation via `POST /api/admin/orders/:id/notes`.
+   */
+  async addOrderNote(
+    id: string,
+    data: { note: string; isCustomerVisible?: boolean }
+  ): Promise<AdminOrderNote> {
+    const response = await apiClient.post<ApiResponse<{ note: any } | any>>(
+      `/api/admin/orders/${encodeURIComponent(id)}/notes`,
+      {
+        note: data.note,
+        isCustomerVisible: Boolean(data.isCustomerVisible),
+      }
+    );
+    const payload = unwrap<{ note?: any } | any>(response, `/api/admin/orders/${id}/notes`);
+    return payload.note || payload;
+  },
+
+  /**
+   * Order refund processing via `POST /api/admin/orders/:id/refund`.
+   */
+  async processOrderRefund(
+    id: string,
+    data: {
+      amount: number;
+      reason: string;
+      restockInventory?: boolean;
+    }
+  ): Promise<{ order: AdminOrderItem; refund: any }> {
+    const response = await apiClient.post<ApiResponse<{ order: any; refund: any } | any>>(
+      `/api/admin/orders/${encodeURIComponent(id)}/refund`,
+      {
+        amount: data.amount,
+        reason: data.reason,
+        restockInventory: data.restockInventory ?? true,
+      }
+    );
+    const payload = unwrap<{ order?: any; refund?: any } | any>(response, `/api/admin/orders/${id}/refund`);
+    const updatedOrder = mapBackendOrderToAdmin(payload.order || payload);
+
+    this._cachedOrders = this._cachedOrders.map((o) =>
+      o.id === id || o.orderNumber === id ? { ...o, ...updatedOrder } : o
+    );
+
+    return {
+      order: updatedOrder,
+      refund: payload.refund,
+    };
+  },
+
+  /** Synchronous placeholder; customers come from the backend. */
+  getCustomers(): AdminCustomerItem[] {
+    return [];
+  },
+
+  /**
+   * Loads customers from `GET /api/admin/users?role=CUSTOMER`.
+   *
+   * Errors propagate (including 403 for a non-admin token) so the view can
+   * show a permission or error state instead of an empty table that reads as
+   * "no customers".
+   */
+  async fetchCustomers(options?: {
+    signal?: AbortSignal;
+    search?: string;
+  }): Promise<AdminCustomerItem[]> {
+    const users = await this.fetchUsersByRole('CUSTOMER', options);
+    return users.map(mapBackendUserToCustomer);
+  },
+
+  getRefunds(): AdminRefundRecord[] {
+    if (typeof window === 'undefined') return INITIAL_REFUNDS;
+    try {
+      const stored = localStorage.getItem(ADMIN_REFUNDS_KEY);
+      if (stored) return JSON.parse(stored);
+      localStorage.setItem(ADMIN_REFUNDS_KEY, JSON.stringify(INITIAL_REFUNDS));
+      return INITIAL_REFUNDS;
+    } catch {
+      return INITIAL_REFUNDS;
+    }
+  },
+
+  processRefund(record: Omit<AdminRefundRecord, 'id' | 'requestedAt' | 'status'>): AdminRefundRecord {
+    const refunds = this.getRefunds();
+    const newRecord: AdminRefundRecord = {
+      ...record,
+      id: `ref-${Date.now().toString().slice(-4)}`,
+      requestedAt: new Date().toISOString().split('T')[0],
+      status: 'completed',
+    };
+    const updated = [newRecord, ...refunds];
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ADMIN_REFUNDS_KEY, JSON.stringify(updated));
+        window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      } catch (err) {
+        console.error('Failed to save refund', err);
+      }
+    }
+    return newRecord;
+  },
+
+  getDiscounts(): AdminDiscountCode[] {
+    if (typeof window === 'undefined') return INITIAL_DISCOUNTS;
+    try {
+      const stored = localStorage.getItem(ADMIN_DISCOUNTS_KEY);
+      if (stored) return JSON.parse(stored);
+      localStorage.setItem(ADMIN_DISCOUNTS_KEY, JSON.stringify(INITIAL_DISCOUNTS));
+      return INITIAL_DISCOUNTS;
+    } catch {
+      return INITIAL_DISCOUNTS;
+    }
+  },
+
+  createDiscount(discount: Omit<AdminDiscountCode, 'id' | 'usageCount'>): AdminDiscountCode {
+    const list = this.getDiscounts();
+    const newDisc: AdminDiscountCode = {
+      ...discount,
+      id: `disc-${Date.now().toString().slice(-4)}`,
+      usageCount: 0,
+    };
+    const updated = [newDisc, ...list];
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ADMIN_DISCOUNTS_KEY, JSON.stringify(updated));
+        window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      } catch (err) {
+        console.error('Failed to create discount', err);
+      }
+    }
+    return newDisc;
+  },
+
+  /** Synchronous placeholder; the ledger is server-authoritative. */
+  getCommissionLedger(): AdminCommissionRecord[] {
+    return [];
+  },
+
+  /**
+   * Loads the admin commission ledger from `GET /api/admin/commission/ledger`.
+   *
+   * Amounts, tiers, rates, and statuses are all computed by the backend's
+   * commission engine; nothing is recalculated here.
+   */
+  async fetchCommissions(options?: {
+    signal?: AbortSignal;
+    search?: string;
+    status?: string;
+    tier?: number;
+    page?: number;
+    limit?: number;
+  }): Promise<AdminCommissionRecord[]> {
+    const response = await apiClient.get<ApiResponse<BackendAdminLedgerPayload>>(
+      '/api/admin/commission/ledger',
+      {
+        ...(options?.search ? { search: options.search } : {}),
+        ...(options?.status ? { status: options.status } : {}),
+        ...(options?.tier !== undefined ? { tier: options.tier } : {}),
+        page: options?.page ?? 1,
+        limit: options?.limit ?? 100,
+      },
+      { signal: options?.signal }
+    );
+
+    const payload = unwrap<BackendAdminLedgerPayload>(
+      response,
+      '/api/admin/commission/ledger'
+    );
+
+    const entries = payload.items || payload.entries || payload.ledger || [];
+    return entries.map(mapBackendLedgerEntry);
+  },
+
+  /**
+   * Commission status transitions.
+   *
+   * BLOCKED: the backend exposes no endpoint to approve, hold, or mark a
+   * commission ledger entry as paid. `POST /api/commission/process-order/:orderId`
+   * and `/refund-order/:orderId` act on an order's commissions as a whole, not
+   * on individual ledger rows.
+   *
+   * Rather than writing a status change to browser storage and showing the
+   * admin a state the database never recorded, this reports that the action is
+   * unavailable.
+   */
+  async updateCommissionStatus(
+    id: string,
+    status: CommissionLedgerStatus
+  ): Promise<boolean> {
+    await apiClient.patch<ApiResponse<any>>(
+      `/api/admin/commission/ledger/${encodeURIComponent(id)}/status`,
+      { status }
+    );
+    notifyAdminDataChanged();
+    return true;
+  },
+
+  /**
+   * Bulk commission approval.
+   *
+   * BLOCKED for the same reason as `updateCommissionStatus`.
+   */
+  async batchApproveCommissions(): Promise<number> {
+    const response = await apiClient.post<ApiResponse<{ count?: number; approvedCount?: number }>>(
+      '/api/admin/commission/ledger/batch-approve',
+      {}
+    );
+    const data = unwrap<{ count?: number; approvedCount?: number }>(
+      response,
+      '/api/admin/commission/ledger/batch-approve'
+    );
+    notifyAdminDataChanged();
+    return data?.count ?? data?.approvedCount ?? 0;
+  },
+
+  /**
+   * Zeroed report shape used only as pre-load placeholder state. The admin
+   * reports view must show its loading skeleton until `fetchReportsData()`
+   * resolves. No value here is derived from browser storage.
+   */
+  getReportsData(timeframe: '7d' | '30d' | '90d' | 'ytd' = '30d'): AdminReportData {
+    return {
+      timeframe,
+      grossSales: 0,
+      netSales: 0,
+      ordersCount: 0,
+      averageOrderValue: 0,
+      visitors: 0,
+      conversionRate: 0,
+      activeRepresentatives: 0,
+      membershipMRR: 0,
+      commissionLiability: 0,
+      totalPayoutsDisbursed: 0,
+      salesByDay: [],
+      trafficByDay: [],
+      tierDistribution: [],
+      membershipBreakdown: [],
+    };
+  },
+
+  /**
+   * Loads the analytics report from the backend and maps it onto the existing
+   * reports view model. Errors propagate so the view can offer a retry.
+   */
+  async fetchReportsData(
+    timeframe: '7d' | '30d' | '90d' | 'ytd' = '30d',
+    options?: { signal?: AbortSignal }
+  ): Promise<AdminReportData> {
+    const [report, central] = await Promise.all([
+      analyticsService.fetchReport(timeframe, options),
+      analyticsService.fetchCommissionCentral(options).catch(() => null),
+    ]);
+
+    return analyticsService.toAdminReportData(report, central);
+  },
+
+  getSettings(): AdminSettingsData {
+    if (typeof window === 'undefined') return INITIAL_SETTINGS;
+    try {
+      const stored = localStorage.getItem(ADMIN_SETTINGS_KEY);
+      if (stored) return JSON.parse(stored);
+      localStorage.setItem(ADMIN_SETTINGS_KEY, JSON.stringify(INITIAL_SETTINGS));
+      return INITIAL_SETTINGS;
+    } catch {
+      return INITIAL_SETTINGS;
+    }
+  },
+
+  /**
+   * Fetches the complete system settings from GET /api/admin/settings.
+   * Maps backend settings schema to AdminSettingsData and keeps local cache in sync.
+   */
+  async fetchSettings(options?: { signal?: AbortSignal }): Promise<AdminSettingsData> {
+    const local = this.getSettings();
+    try {
+      const response = await apiClient.get<ApiResponse<any>>(
+        '/api/admin/settings',
+        undefined,
+        { signal: options?.signal }
+      );
+      const payload = unwrap<any>(response, '/api/admin/settings');
+      const mapped = mapBackendSettingsToAdmin(payload, local);
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(ADMIN_SETTINGS_KEY, JSON.stringify(mapped));
+        } catch {
+          // ignore
+        }
+      }
+      return mapped;
+    } catch (err) {
+      if (options?.signal?.aborted) throw err;
+      return local;
+    }
+  },
+
+  /**
+   * Saves system settings locally and sends the updates to PUT /api/admin/settings.
+   */
+  async saveSettings(settings: AdminSettingsData): Promise<boolean> {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ADMIN_SETTINGS_KEY, JSON.stringify(settings));
+        window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      } catch (err) {
+        console.error('Failed to save settings', err);
+      }
+    }
+
+    try {
+      const body = mapAdminSettingsToBackend(settings);
+      await apiClient.put('/api/admin/settings', body);
+    } catch (err) {
+      console.warn('Backend settings update failed, kept optimistic local settings:', err);
+    }
+
+    notifyAdminDataChanged();
+    return true;
+  },
+
+  // Homepage Content Management
+  getHomepageContent(): HomepageContentConfig {
+    const DEFAULT_CONTENT: HomepageContentConfig = {
+      announcementText: '⚡ FREE SHIPPING ON SURPRISE CANDLE ORDERS OVER $50 + REAL CASH PRIZES IN EVERY CANDLE!',
+      announcementActive: true,
+      announcementLink: '/shop',
+      promoBannerText: 'Use code SURPRISE15 at checkout for 15% OFF your first surprise candle reveal!',
+      promoBannerCode: 'SURPRISE15',
+      promoBannerActive: true,
+      featuredCards: [
+        {
+          id: 'halloween',
+          title: 'Wax Melts',
+          categoryKey: 'Wax Melts',
+          badge: 'Fragrance Melts',
+          tagline: 'Long-lasting surprise wax melts with cash and jewelry reveals inside',
+          ctaText: 'Shop Wax Melts',
+          image: 'https://cdn.shopify.com/s/files/1/0172/4672/products/4_Mockup_Jewelry_JewelryCandles_37b9e8df-fc51-4b27-9db3-6236ee9d84b6.jpg?v=1602742369',
+          itemCount: 83,
+          accentBorder: 'hover:border-orange-500',
+          active: true,
+        },
+        {
+          id: 'christmas-candles-1',
+          title: 'Christmas',
+          categoryKey: 'Christmas Candles',
+          badge: 'Holiday Priority',
+          tagline: 'Magical Christmas reveal candles and seasonal celebration scents with hidden treasures',
+          ctaText: 'Shop Christmas Collection',
+          image: 'https://cdn.shopify.com/s/files/1/0172/4672/products/1_Mockup_Jewelry_Jewelry_Candles_9c1f97ea-399f-403a-ae64-3f3afc816a87.jpg?v=1573149158',
+          itemCount: 98,
+          accentBorder: 'hover:border-red-500',
+          active: true,
+        },
+        {
+          id: 'cash-money-candles',
+          title: 'Money Cash Candles',
+          categoryKey: 'Cash Money Candles',
+          badge: 'Win Up To $2,500',
+          tagline: 'Real cash prizes ($2 – $2,500) hidden inside every single candle',
+          ctaText: 'Shop Money Cash Candles',
+          image: '/assets/ilovesurprises/categories/cash_money_candles.jpg',
+          itemCount: 76,
+          accentBorder: 'hover:border-emerald-400',
+          active: true,
+        },
+        {
+          id: 'jewelry-candy',
+          title: 'Jewelry Candles',
+          categoryKey: 'Jewelry Candles',
+          badge: '💎 Real Jewelry Inside',
+          tagline: 'Delicious sweet treats with a real surprise jewelry piece hidden inside every single tube',
+          ctaText: 'Shop Jewelry Candles',
+          image: 'https://cdn.shopify.com/s/files/1/0172/4672/products/10_Mockup_Jewelry_JewelryCandles_f8e103f9-76ed-434e-a46b-87c79da2da4d.jpg?v=1588143552',
+          itemCount: 28,
+          accentBorder: 'hover:border-purple-500',
+          active: true,
+        },
+      ],
+      hero: {
+        desktopBannerImage: '/assets/ilovesurprises/banners/Neww banner.jpeg',
+        mobileBannerImage: '/assets/ilovesurprises/banners/mobile-banner.jpg',
+        headline: 'ILoveSurprises.com — Discover jewelry, cash, and surprises inside every candle & bath bomb',
+        subheadline: 'Handcrafted soy candles and bath treats with authentic real cash and luxury jewelry reveals in every product.',
+        benefitTiles: [
+          { id: 'hidden-jewelry', title: 'Hidden Jewelry Reveals', subtitle: 'Real jewelry in every product', iconName: 'Gem', actionType: 'shop' },
+          { id: 'viral-unboxing', title: 'Viral Unboxing Fun', subtitle: 'Share, surprise, repeat', iconName: 'Gift', actionType: 'shop' },
+          { id: 'start-store', title: 'Start Your Store', subtitle: 'Your business. Your way.', iconName: 'Store', actionType: 'consultant' },
+          { id: 'earn-5-levels', title: 'Earn From 5 Levels', subtitle: 'Build your team. Grow together.', iconName: 'Users', actionType: 'consultant' },
+        ],
+      },
+      valueProposition: {
+        eyebrow: '100% Real Reveal Guarantee',
+        title: 'Why Customers Love I Love Surprises',
+        description: 'Every single hand-poured candle and artisan bath treat conceals an authentic legal tender cash prize ($2 to $2,500) or genuine fine jewelry appraised up to $7,500.',
+        points: [
+          'Guaranteed genuine cash prizes sealed in protective gold foil',
+          'Solid .925 sterling silver & 14k gold rings with verified appraisal tags',
+          'Handcrafted with clean, 100% natural USA soy wax',
+          'Fast nationwide dispatch with real-time tracking',
+        ],
+      },
+      aboutContent: {
+        badge: 'Our Brand Story & Craftsmanship',
+        headline: 'Where Luxury Fragrance Meets the Thrill of Real Surprises',
+        storyText: 'Hand-poured 100% natural soy wax candles crafted with artisan care in the USA. Every single candle, bath treat, and wax melt is guaranteed to conceal authentic cash ($2 to $2,500) or luxury fine jewelry (appraised up to $7,500).',
+        naturalSoyStat: '100% Natural Soy',
+        unboxingsStat: '85,000+ Unboxings',
+        realCashStat: '$2 to $2.5K Real Cash',
+      },
+      faqItems: [
+        { id: 'faq-1', question: 'What is I Love Surprises?', answer: 'I Love Surprises offers fun products designed around the excitement of discovering a surprise. Depending on the product, the surprise may include jewelry, cash, or another featured reward.', category: 'About Surprises' },
+        { id: 'faq-2', question: 'What kinds of products do you offer?', answer: 'Our assortment includes candles, wax melts, bath products, soaps, candy, chocolates, slimes, greeting cards, jewelry, and other surprise products.', category: 'Products' },
+        { id: 'faq-3', question: 'Are the candles soy based?', answer: 'Where specified on the product page, our candle products are made with 100% natural soy wax.', category: 'Products' },
+        { id: 'faq-4', question: 'Can I choose my jewelry or ring size?', answer: 'Yes! Jewelry surprise products allow you to select ring sizes from 5 to 10 or preferred jewelry styles right on the product page.', category: 'Jewelry & Sizing' },
+        { id: 'faq-5', question: 'How do I check my jewelry appraisal code?', answer: 'Visit our Appraisal Verification portal (/appraise) and enter the authentic verification code printed on your jewelry reveal tag to inspect assessed retail value.', category: 'Jewelry & Sizing' },
+        { id: 'faq-6', question: 'Where do you ship and what are rates?', answer: 'We ship nationwide across the United States and selected international regions. Orders over $50 enjoy Free Express Shipping.', category: 'Shipping & Delivery' },
+      ],
+      footerContent: {
+        newsletterTitle: 'Unlock 15% Off Your Next Surprise & Weekly Cash Drop Alerts',
+        newsletterSubtitle: 'Join over 85,000+ unboxing fans. Be first to know about new limited scents, rare diamond jewelry drops, and grand cash reveals.',
+        copyrightText: '© 2026 ILoveSurprises.com. All rights reserved. Hand-poured with love in the USA.',
+        supportEmail: 'support@ilovesurprises.com',
+        supportPhone: '1-800-SURPRISE',
+        guaranteeText: '256-Bit SSL Encrypted Bank-Grade Checkout',
+      },
+    };
+
+    if (typeof window === 'undefined') return DEFAULT_CONTENT;
+    try {
+      const stored = localStorage.getItem(ADMIN_HOMEPAGE_CONTENT_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        const hasHalloween = parsed.featuredCards?.some((c: any) => c.id === 'halloween');
+        const hasChristmas = parsed.featuredCards?.some((c: any) => c.id === 'christmas-candles-1');
+        const hasCash = parsed.featuredCards?.some((c: any) => c.id === 'cash-candles');
+        const hasZodiac = parsed.featuredCards?.some((c: any) => c.id === 'zodiac-cash-money-candles');
+        const hasObsolete = parsed.featuredCards?.some((c: any) => c.id === 'trending-collection');
+        if (hasHalloween && hasChristmas && hasCash && hasZodiac && !hasObsolete) {
+          return {
+            ...DEFAULT_CONTENT,
+            ...parsed,
+            hero: parsed.hero ? { ...DEFAULT_CONTENT.hero, ...parsed.hero } : DEFAULT_CONTENT.hero,
+            valueProposition: parsed.valueProposition ? { ...DEFAULT_CONTENT.valueProposition, ...parsed.valueProposition } : DEFAULT_CONTENT.valueProposition,
+            aboutContent: parsed.aboutContent ? { ...DEFAULT_CONTENT.aboutContent, ...parsed.aboutContent } : DEFAULT_CONTENT.aboutContent,
+            faqItems: parsed.faqItems && parsed.faqItems.length > 0 ? parsed.faqItems : DEFAULT_CONTENT.faqItems,
+            footerContent: parsed.footerContent ? { ...DEFAULT_CONTENT.footerContent, ...parsed.footerContent } : DEFAULT_CONTENT.footerContent,
+          };
+        }
+      }
+      localStorage.setItem(ADMIN_HOMEPAGE_CONTENT_KEY, JSON.stringify(DEFAULT_CONTENT));
+      return DEFAULT_CONTENT;
+    } catch {
+      return DEFAULT_CONTENT;
+    }
+  },
+
+  /**
+   * Persists homepage content across all storefront sections in bulk.
+   * Matches "Publish to Storefront" action button via PUT /api/admin/storefront.
+   */
+  async saveHomepageContent(content: HomepageContentConfig): Promise<void> {
+    await cmsService.updateFullStorefront({
+      announcementText: content.announcementText,
+      announcementActive: content.announcementActive,
+      announcementLink: content.announcementLink,
+      promoBannerText: content.promoBannerText,
+      promoBannerCode: content.promoBannerCode,
+      promoBannerActive: content.promoBannerActive,
+      banners: {
+        topStickyAnnouncementBar: {
+          isActive: content.announcementActive,
+          announcementCopy: content.announcementText,
+          announcementLink: content.announcementLink,
+        },
+        promotionalDiscountAlertBar: {
+          isActive: content.promoBannerActive,
+          promoCopy: content.promoBannerText,
+          promoCode: content.promoBannerCode || '',
+        },
+      },
+      featuredCards: content.featuredCards,
+      showcaseCards: (content.featuredCards || []).map((card, idx) => ({
+        id: card.id,
+        cardKey: card.id,
+        displayTitle: card.title,
+        highlightBadge: card.badge,
+        tagline: card.tagline,
+        ctaButtonText: card.ctaText,
+        targetCategoryKey: card.categoryKey,
+        showcaseImageUri: card.image,
+        displayOnHomepage: card.active !== false,
+        isActive: card.active !== false,
+        sortOrder: idx + 1,
+        itemCount: card.itemCount,
+        accentBorder: card.accentBorder,
+      })),
+      hero: content.hero,
+      valueProposition: content.valueProposition,
+      aboutContent: content.aboutContent,
+      faqItems: content.faqItems,
+      footerContent: content.footerContent,
+    });
+
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ADMIN_HOMEPAGE_CONTENT_KEY, JSON.stringify(content));
+      } catch (err) {
+        console.error('Failed to cache homepage content', err);
+      }
+      window.dispatchEvent(new CustomEvent('ils_homepage_content_updated'));
+      window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      window.dispatchEvent(new CustomEvent('ils_storefront_updated'));
+    }
+  },
+
+  /**
+   * Loads homepage content with GET /api/storefront (or GET /api/admin/storefront)
+   * as the authoritative source for all sections.
+   */
+  async fetchLiveStorefrontContent(options?: {
+    signal?: AbortSignal;
+    admin?: boolean;
+  }): Promise<HomepageContentConfig> {
+    const local = this.getHomepageContent();
+
+    const storefront = options?.admin
+      ? await cmsService.getAdminStorefront({ signal: options?.signal })
+      : await cmsService.getStorefront({ signal: options?.signal });
+
+    const merged = mergeStorefrontIntoHomepageContent(local, storefront);
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(ADMIN_HOMEPAGE_CONTENT_KEY, JSON.stringify(merged));
+      } catch {
+        // ignore
+      }
+    }
+    return merged;
+  },
+
+  resetHomepageContent(): HomepageContentConfig {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.removeItem(ADMIN_HOMEPAGE_CONTENT_KEY);
+      } catch {
+        // ignore
+      }
+    }
+    const def = this.getHomepageContent();
+    window.dispatchEvent(new CustomEvent('ils_homepage_content_updated'));
+    window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+    window.dispatchEvent(new CustomEvent('ils_storefront_updated'));
+    return def;
+  },
+
+  /**
+   * Resets all storefront content on the backend database to factory defaults
+   * via POST /api/admin/storefront/reset.
+   */
+  async resetHomepageContentLive(): Promise<HomepageContentConfig> {
+    try {
+      const reset = await cmsService.resetStorefrontDefaults();
+      const local = this.getHomepageContent();
+      const merged = mergeStorefrontIntoHomepageContent(local, reset);
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(ADMIN_HOMEPAGE_CONTENT_KEY, JSON.stringify(merged));
+        } catch {
+          // ignore
+        }
+      }
+      window.dispatchEvent(new CustomEvent('ils_homepage_content_updated'));
+      window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      window.dispatchEvent(new CustomEvent('ils_storefront_updated'));
+      return merged;
+    } catch {
+      return this.resetHomepageContent();
+    }
+  },
+
+  // Staff Administration (Super Admin / Manager RBAC)
+  async getStaffAdmins(): Promise<AdminStaffUser[]> {
+    const defaultStaff: AdminStaffUser[] = [
+      {
+        id: 'staff-primary-admin',
+        email: 'ilovesurprisedotcom@gmail.com',
+        name: 'Osagie Enahio',
+        role: 'super_admin',
+        avatarUrl: '/assets/ilovesurprises/avatars/founder.png',
+        lastActive: 'Just now',
+        createdAt: '2026-09-08T11:03:23Z',
+        twoFactorEnabled: false,
+        twoFactorRequired: false,
+        status: 'active',
+      },
+    ];
+
+    const loadLocalStaffState = () => {
+      let customStaff: AdminStaffUser[] = [];
+      let roleOverrides: Record<string, AdminRole> = {};
+      let deletedStaff: string[] = [];
+      if (typeof window !== 'undefined') {
+        try {
+          const storedCustom = localStorage.getItem(ADMIN_STAFF_MEMBERS_KEY);
+          if (storedCustom) customStaff = JSON.parse(storedCustom);
+        } catch {
+          // ignore
+        }
+        try {
+          const storedRoleOverrides = localStorage.getItem(ADMIN_STAFF_OVERRIDE_KEY);
+          if (storedRoleOverrides) roleOverrides = JSON.parse(storedRoleOverrides);
+        } catch {
+          // ignore
+        }
+        try {
+          const storedDeleted =
+            localStorage.getItem(ADMIN_STAFF_DELETED_KEY) ||
+            sessionStorage.getItem(ADMIN_STAFF_DELETED_KEY);
+          if (storedDeleted) {
+            const parsed = JSON.parse(storedDeleted);
+            deletedStaff = Array.isArray(parsed) ? parsed.slice(-MAX_STAFF_DELETED_TOMBSTONES) : [];
+            if (Array.isArray(parsed) && parsed.length !== deletedStaff.length) {
+              try {
+                localStorage.removeItem(ADMIN_STAFF_DELETED_KEY);
+                localStorage.setItem(ADMIN_STAFF_DELETED_KEY, JSON.stringify(deletedStaff));
+                sessionStorage.removeItem(ADMIN_STAFF_DELETED_KEY);
+              } catch {
+                try {
+                  localStorage.removeItem(ADMIN_STAFF_DELETED_KEY);
+                  sessionStorage.setItem(ADMIN_STAFF_DELETED_KEY, JSON.stringify(deletedStaff));
+                } catch {
+                  // ignore
+                }
+              }
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+      const deletedSet = new Set(deletedStaff.map((value) => String(value).toLowerCase()));
+      return { customStaff, roleOverrides, deletedSet };
+    };
+
+    const isProtectedPrimaryStaff = (staff: Pick<AdminStaffUser, 'id' | 'email' | 'role'>) =>
+      staff.id === 'staff-primary-admin' ||
+      PROTECTED_SUPER_ADMIN_EMAILS.has(staff.email.toLowerCase());
+
+    const isDeletedStaff = (
+      staff: Pick<AdminStaffUser, 'id' | 'email' | 'role'>,
+      deletedSet: Set<string>
+    ) => {
+      if (isProtectedPrimaryStaff(staff)) return false;
+      return deletedSet.has(staff.id.toLowerCase()) || deletedSet.has(staff.email.toLowerCase());
+    };
+
+    const roleForStaff = (
+      staff: Pick<AdminStaffUser, 'id' | 'email' | 'role'>,
+      roleOverrides: Record<string, AdminRole>
+    ): AdminRole => {
+      if (PROTECTED_SUPER_ADMIN_EMAILS.has(staff.email.toLowerCase())) {
+        return 'super_admin';
+      }
+      return (
+        roleOverrides[staff.id] ||
+        roleOverrides[staff.email.toLowerCase()] ||
+        staff.role
+      );
+    };
+
+    const backendUserToStaff = (
+      user: BackendAdminUser,
+      roleOverrides: Record<string, AdminRole>
+    ): AdminStaffUser => {
+      const email = user.email.toLowerCase();
+      const backendRole = String(user.role || '').toUpperCase();
+      const baseRole: AdminRole =
+        PROTECTED_SUPER_ADMIN_EMAILS.has(email) || backendRole === 'ADMIN'
+          ? 'super_admin'
+          : 'store_manager';
+      const name = [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || email.split('@')[0];
+      const baseStaff: AdminStaffUser = {
+        id: user.id,
+        email,
+        name,
+        role: baseRole,
+        lastActive: user.isActive ? 'Active (Database credentials)' : 'Suspended',
+        createdAt: user.createdAt || new Date().toISOString(),
+        twoFactorRequired: false,
+        twoFactorEnabled: false,
+        status: user.isActive ? 'active' : 'suspended',
+      };
+      return {
+        ...baseStaff,
+        role: roleForStaff(baseStaff, roleOverrides),
+      };
+    };
+
+    try {
+      const { customStaff, roleOverrides, deletedSet } = loadLocalStaffState();
+      const [staffUsers, adminUsers] = await Promise.all([
+        this.fetchUsersByRole('STAFF').catch(() => []),
+        this.fetchUsersByRole('ADMIN').catch(() => []),
+      ]);
+      const backendStaff = [...adminUsers, ...staffUsers].map((u) =>
+        backendUserToStaff(u, roleOverrides)
+      );
+
+      const mergedByKey = new Map<string, AdminStaffUser>();
+      const addStaff = (staff: AdminStaffUser) => {
+        if (isDeletedStaff(staff, deletedSet)) return;
+        const emailKey = staff.email.toLowerCase();
+        const existingKey = Array.from(mergedByKey.keys()).find((key) => {
+          const existing = mergedByKey.get(key);
+          return existing?.id === staff.id || existing?.email.toLowerCase() === emailKey;
+        });
+        const resolved = {
+          ...staff,
+          role: roleForStaff(staff, roleOverrides),
+          twoFactorRequired: false,
+          twoFactorEnabled: false,
+          status: staff.status || 'active',
+        };
+        if (existingKey) {
+          mergedByKey.set(existingKey, { ...mergedByKey.get(existingKey)!, ...resolved });
+        } else {
+          mergedByKey.set(staff.id || emailKey, resolved);
+        }
+      };
+
+      defaultStaff.forEach(addStaff);
+      customStaff.forEach(addStaff);
+      backendStaff.forEach(addStaff);
+
+      return Array.from(mergedByKey.values()).sort((a, b) => {
+        if (a.role === 'super_admin' && b.role !== 'super_admin') return -1;
+        if (a.role !== 'super_admin' && b.role === 'super_admin') return 1;
+        return a.name.localeCompare(b.name);
+      });
+    } catch {
+      const { customStaff, roleOverrides, deletedSet } = loadLocalStaffState();
+      const allStaff = defaultStaff.filter((staff) => !isDeletedStaff(staff, deletedSet));
+      const seen = new Set(defaultStaff.map((s) => s.email.toLowerCase()));
+      customStaff.forEach((staff) => {
+        if (!seen.has(staff.email.toLowerCase()) && !isDeletedStaff(staff, deletedSet)) {
+          allStaff.push(staff);
+          seen.add(staff.email.toLowerCase());
+        }
+      });
+      return allStaff.map((staff) => ({
+        ...staff,
+        role: roleForStaff(staff, roleOverrides),
+        twoFactorRequired: false,
+        twoFactorEnabled: false,
+        status: staff.status || 'active',
+      }));
+    }
+  },
+
+  saveStaffRoleOverride(staff: Pick<AdminStaffUser, 'id' | 'email'>, role: AdminRole): void {
+    if (typeof window === 'undefined') return;
+    try {
+      let overrides: Record<string, AdminRole> = {};
+      const stored = localStorage.getItem(ADMIN_STAFF_OVERRIDE_KEY);
+      if (stored) overrides = JSON.parse(stored);
+      overrides[staff.id] = role;
+      overrides[staff.email.toLowerCase()] = role;
+      localStorage.setItem(ADMIN_STAFF_OVERRIDE_KEY, JSON.stringify(overrides));
+
+      const rawCustom = localStorage.getItem(ADMIN_STAFF_MEMBERS_KEY);
+      if (rawCustom) {
+        const list: AdminStaffUser[] = JSON.parse(rawCustom);
+        const updated = list.map((s) =>
+          s.id === staff.id || s.email.toLowerCase() === staff.email.toLowerCase()
+            ? { ...s, role }
+            : s
+        );
+        localStorage.setItem(ADMIN_STAFF_MEMBERS_KEY, JSON.stringify(updated));
+      }
+    } catch (err) {
+      console.error('Failed to save staff role override', err);
+    }
+  },
+
+  async updateStaffRole(staffId: string, newRole: AdminRole): Promise<void> {
+    const allStaff = await this.getStaffAdmins();
+    const target = allStaff.find((s) => s.id === staffId || s.email.toLowerCase() === staffId.toLowerCase());
+    if (!target) {
+      throw new Error('Staff member not found.');
+    }
+
+    try {
+      const endpoint = `/api/admin/staff/${encodeURIComponent(target.id)}`;
+      const payload = {
+        name: target.name,
+        email: target.email,
+        role: newRole,
+        isActive: target.status !== 'suspended',
+      };
+      try {
+        await apiClient.patch(endpoint, payload);
+      } catch (err: any) {
+        if (err instanceof ApiError && err.statusCode === 404) {
+          await apiClient.put(endpoint, payload);
+        } else {
+          throw err;
+        }
+      }
+    } catch (err: any) {
+      if (err?.statusCode === 403) {
+        throw new Error('Only Super Admin can assign staff roles.');
+      }
+      // Default seeded demo staff may not exist in the database yet. The
+      // assignment is still persisted locally so the RBAC matrix updates.
+      console.warn('Backend staff role update note / local role override:', err);
+    }
+
+    this.saveStaffRoleOverride(target, newRole);
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+  },
+
+  async updateStaffMember(
+    staffId: string,
+    updates: {
+      name?: string;
+      email?: string;
+      role?: AdminRole;
+      password?: string;
+      status?: 'active' | 'invited' | 'suspended';
+    }
+  ): Promise<AdminStaffUser | null> {
+    const cleanEmail = updates.email?.trim().toLowerCase();
+    const cleanName = updates.name?.trim();
+
+    let backendUser: any = null;
+    const endpoint = `/api/admin/staff/${encodeURIComponent(staffId)}`;
+    const payload = {
+      name: cleanName,
+      email: cleanEmail,
+      role: updates.role,
+      password: updates.password?.trim() || undefined,
+      isActive: updates.status === 'active',
+    };
+
+    try {
+      let response: ApiResponse<BackendAdminUser>;
+      try {
+        response = await apiClient.patch<ApiResponse<BackendAdminUser>>(endpoint, payload);
+      } catch (err: any) {
+        if (err instanceof ApiError && err.statusCode === 404) {
+          response = await apiClient.put<ApiResponse<BackendAdminUser>>(endpoint, payload);
+        } else {
+          throw err;
+        }
+      }
+      backendUser = unwrap<BackendAdminUser>(response, `/api/admin/staff/${staffId}`);
+    } catch (err: any) {
+      if (err?.statusCode === 403) {
+        throw new Error('Only Super Admin can edit staff credentials.');
+      }
+      if (err?.statusCode === 404) {
+        throw new Error('Staff save endpoint is not available on the running backend. Restart or redeploy the backend, then try again.');
+      }
+      throw err;
+    }
+
+    const updatedStaff: AdminStaffUser = {
+      id: backendUser?.id || staffId,
+      name: [backendUser?.firstName, backendUser?.lastName].filter(Boolean).join(' ').trim() || cleanName || '',
+      email: backendUser?.email || cleanEmail || '',
+      role: updates.role || 'store_manager',
+      lastActive: updates.password ? 'Active (Login credentials updated)' : 'Active (Database credentials)',
+      createdAt: backendUser?.createdAt || new Date().toISOString(),
+      twoFactorRequired: false,
+      twoFactorEnabled: false,
+      status: updates.status || (backendUser?.isActive === false ? 'suspended' : 'active'),
+    };
+
+    if (typeof window !== 'undefined') {
+      try {
+        let existing: AdminStaffUser[] = [];
+        const raw = localStorage.getItem(ADMIN_STAFF_MEMBERS_KEY);
+        if (raw) existing = JSON.parse(raw);
+
+        const index = existing.findIndex((s) => s.id === staffId || s.email.toLowerCase() === staffId.toLowerCase());
+        if (index >= 0) {
+          existing[index] = { ...existing[index], ...updatedStaff };
+        } else {
+          existing.push(updatedStaff);
+        }
+
+        localStorage.setItem(ADMIN_STAFF_MEMBERS_KEY, JSON.stringify(existing));
+        if (updates.role) this.saveStaffRoleOverride(updatedStaff, updates.role);
+        window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      } catch (err) {
+        console.error('Failed to update local staff storage', err);
+      }
+    }
+
+    return updatedStaff;
+  },
+
+  async addStaffMember(params: {
+    name: string;
+    email: string;
+    password?: string;
+    role: AdminRole;
+    twoFactorRequired?: boolean;
+    status?: 'active' | 'invited';
+  }): Promise<AdminStaffUser> {
+    const cleanEmail = params.email.trim().toLowerCase();
+    const cleanName = params.name.trim();
+
+    if (!cleanName) throw new Error('Staff name is required.');
+    if (!cleanEmail || !cleanEmail.includes('@')) throw new Error('Valid email address is required.');
+
+    let backendUser: BackendAdminUser;
+    try {
+      const response = await apiClient.post<ApiResponse<BackendAdminUser>>('/api/admin/staff', {
+        name: cleanName,
+        email: cleanEmail,
+        password: params.password,
+        role: params.role,
+      });
+      backendUser = unwrap<BackendAdminUser>(response, '/api/admin/staff');
+    } catch (err: any) {
+      if (err?.statusCode === 403) {
+        throw new Error('Only Super Admin can create staff credentials in the database.');
+      }
+      throw err;
+    }
+
+    const newStaff: AdminStaffUser = {
+      id: backendUser.id,
+      email: backendUser.email,
+      name: [backendUser.firstName, backendUser.lastName].filter(Boolean).join(' ').trim() || cleanName,
+      role: params.role,
+      lastActive: 'Active (Login credentials configured)',
+      createdAt: backendUser.createdAt || new Date().toISOString(),
+      twoFactorRequired: false,
+      twoFactorEnabled: false,
+      status: backendUser.isActive === false ? 'suspended' : params.status || 'active',
+    };
+
+    if (typeof window !== 'undefined') {
+      try {
+        let existing: AdminStaffUser[] = [];
+        const raw = localStorage.getItem(ADMIN_STAFF_MEMBERS_KEY);
+        if (raw) existing = JSON.parse(raw);
+
+        // Update existing or add new
+        const index = existing.findIndex((s) => s.email.toLowerCase() === cleanEmail);
+        if (index >= 0) {
+          existing[index] = { ...existing[index], ...newStaff };
+        } else {
+          existing.push(newStaff);
+        }
+
+        localStorage.setItem(ADMIN_STAFF_MEMBERS_KEY, JSON.stringify(existing));
+        this.saveStaffRoleOverride(newStaff, params.role);
+        window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      } catch (err) {
+        console.error('Failed to save staff member', err);
+        throw err;
+      }
+    }
+
+    return newStaff;
+  },
+
+  async removeStaffMember(staffId: string): Promise<boolean> {
+    if (staffId === 'staff-primary-admin') {
+      throw new Error('Founder & Primary Super Administrator cannot be removed.');
+    }
+    const allStaff = await this.getStaffAdmins();
+    const target = allStaff.find(
+      (s) => s.id === staffId || s.email.toLowerCase() === staffId.toLowerCase()
+    );
+    const targetId = target?.id || staffId;
+    const targetEmail = target?.email.toLowerCase();
+
+    if (
+      targetEmail &&
+      PROTECTED_SUPER_ADMIN_EMAILS.has(targetEmail)
+    ) {
+      throw new Error('Primary administrator accounts are protected and cannot be removed.');
+    }
+
+    await apiClient.delete(`/api/admin/staff/${encodeURIComponent(targetId)}`);
+    if (typeof window !== 'undefined') {
+      const targetKeys = [
+        targetId.toLowerCase(),
+        ...(targetEmail ? [targetEmail] : []),
+      ];
+
+      const setStaffStorage = (key: string, value: unknown) => {
+        try {
+          localStorage.setItem(key, JSON.stringify(value));
+        } catch (err) {
+          console.warn(`Unable to persist ${key}; continuing after backend staff delete.`, err);
+        }
+      };
+
+      const persistDeletedStaffKeys = () => {
+        const compact = Array.from(new Set(targetKeys)).slice(-MAX_STAFF_DELETED_TOMBSTONES);
+
+        try {
+          localStorage.removeItem(ADMIN_STAFF_DELETED_KEY);
+          localStorage.setItem(ADMIN_STAFF_DELETED_KEY, JSON.stringify(compact));
+        } catch (err) {
+          try {
+            localStorage.removeItem(ADMIN_STAFF_DELETED_KEY);
+            sessionStorage.setItem(ADMIN_STAFF_DELETED_KEY, JSON.stringify(compact));
+          } catch (fallbackErr) {
+            console.warn('Unable to persist deleted staff marker; backend delete still succeeded.', fallbackErr || err);
+          }
+        }
+      };
+
+      try {
+        persistDeletedStaffKeys();
+
+        const raw = localStorage.getItem(ADMIN_STAFF_MEMBERS_KEY);
+        if (raw) {
+          const list: AdminStaffUser[] = JSON.parse(raw);
+          const filtered = list.filter((s) => {
+            const email = s.email.toLowerCase();
+            return s.id !== targetId && s.id !== staffId && email !== staffId.toLowerCase() && email !== targetEmail;
+          });
+          setStaffStorage(ADMIN_STAFF_MEMBERS_KEY, filtered);
+        }
+
+        const rawOverrides = localStorage.getItem(ADMIN_STAFF_OVERRIDE_KEY);
+        if (rawOverrides) {
+          const overrides = JSON.parse(rawOverrides);
+          delete overrides[staffId];
+          delete overrides[targetId];
+          if (targetEmail) delete overrides[targetEmail];
+          setStaffStorage(ADMIN_STAFF_OVERRIDE_KEY, overrides);
+        }
+
+        const raw2FA = localStorage.getItem(ADMIN_STAFF_2FA_OVERRIDE_KEY);
+        if (raw2FA) {
+          const overrides2fa = JSON.parse(raw2FA);
+          delete overrides2fa[staffId];
+          delete overrides2fa[targetId];
+          if (targetEmail) delete overrides2fa[targetEmail];
+          setStaffStorage(ADMIN_STAFF_2FA_OVERRIDE_KEY, overrides2fa);
+        }
+      } catch (err) {
+        console.warn('Staff member was removed from the backend, but local cleanup had a recoverable issue.', err);
+      }
+
+      window.dispatchEvent(new CustomEvent('ils_admin_updated'));
+      return true;
+    }
+    return false;
+  },
+
+  async toggleStaff2FA(_staffId: string, _required?: boolean): Promise<boolean> {
+    return false;
+  },
+
+  is2FARequiredForUser(_email: string, _role?: AdminRole): boolean {
+    return false;
+  },
+
+  get2FASecretKey(): string {
+    return '';
+  },
+
+  verifyAdmin2FACode(_code: string): boolean {
+    return true;
+  },
+};

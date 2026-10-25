@@ -1,0 +1,2121 @@
+import { reviewService } from '../services/reviewService';
+import { productService } from '../services/productService';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+  ArrowLeft,
+  Star,
+  Plus,
+  Minus,
+  ShieldCheck,
+  Truck,
+  RotateCcw,
+  DollarSign,
+  Gem,
+  CheckCircle2,
+  Gift,
+  X,
+  MessageSquare,
+  Check,
+  Clock,
+  ChevronDown,
+  Heart,
+  Search,
+} from 'lucide-react';
+import { ProductGallery } from '../components/products/ProductGallery';
+import { ProductCard } from '../components/products/ProductCard';
+import { RingSizerModal } from '../components/products/RingSizerModal';
+import { reviewsData } from '../data/reviews';
+import type { Product, CartItem, Review } from '../types';
+import { useRelatedProducts } from '../hooks/useProducts';
+import { representativeService, type PublicRepresentative } from '../services/representativeService';
+import { FREE_SHIPPING_THRESHOLD, RETURN_POLICY_LABEL } from '../config/policyConstants';
+import { APPROVED_COLLECTIONS_MAP } from '../data/approvedCollectionsData';
+import { getProductDropdownStatus } from '../data/productDropdownAudit';
+
+interface ProductDetailsProps {
+  product: Product;
+  cart?: CartItem[];
+  wishlistIds?: string[];
+  onBackToShop: () => void;
+  onAddToCart: (
+    product: Product,
+    quantity?: number,
+    options?: { selectedRingSize?: number; selectedJewelryType?: string; selectedSize?: string; selectedScent?: string }
+  ) => void;
+  onUpdateQuantity: (productId: string, delta: number) => void;
+  onWishlistToggle: (product: Product) => void;
+  onSelectProduct: (product: Product) => void;
+  onOpenCart?: () => void;
+  onBuyNow?: (
+    product: Product,
+    quantity?: number,
+    options?: { selectedRingSize?: number; selectedJewelryType?: string; selectedSize?: string; selectedScent?: string }
+  ) => void;
+  onNavigateToAppraisal?: () => void;
+  onShowToast?: (message: string, options?: { title?: string; type?: 'success' | 'info' }) => void;
+}
+
+const LOCAL_REVIEWS_KEY = 'ilovesurprises_user_reviews_v1';
+export const RING_SIZES = [5, 6, 7, 8, 9, 10, 11];
+export const JEWELRY_TYPES = ['Ring', 'Necklace', 'Earrings', 'Bracelet', 'Surprise Me'];
+export const SURPRISE_ME_OPTIONS = [
+  'Surprise me!',
+  'Bracelet',
+  'Earrings',
+  'Necklace',
+  'Ring Size 5',
+  'Ring Size 6',
+  'Ring Size 7',
+  'Ring Size 8',
+  'Ring Size 9',
+  'Ring Size 10',
+  'Ring Size 11',
+];
+
+/**
+ * Detects whether an option is a Jewelry Type or Ring Size option.
+ * Prevents duplicate option blocks from being rendered when
+ * the dedicated luxury jewelry reveal & ring size selector is active.
+ */
+export function isJewelryOrRingOption(opt: { name?: string; values?: string[] }): boolean {
+  if (!opt) return false;
+  const name = (opt.name || '').toLowerCase().trim();
+  if (/jewelry|reveal|ring|size/i.test(name)) return true;
+  if (opt.values?.some((v) => /ring|necklace|earring|bracelet|surprise/i.test(String(v).trim()))) {
+    return true;
+  }
+  if (opt.values?.some((v) => /^(?:size\s*)?(?:[5-9]|1[0-2])(?:\s*us)?$/i.test(String(v).trim()))) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Detects whether a product belongs to the Cash Money Candles or Jewellery Candles category.
+ * Scent selection is completely excluded for these two categories only.
+ * Other candle categories and scented items (wax melts, bath bombs, soaps, slimes, etc.) retain full scent options.
+ */
+export function isScentSelectionExcluded(product: {
+  id?: string;
+  name?: string;
+  slug?: string;
+  category?: string;
+  options?: any[];
+  variants?: any[];
+  scentNotes?: string[];
+}): boolean {
+  if (!product) return false;
+
+  const id = (product.id || '').toLowerCase().trim();
+  const slug = (product.slug || '').toLowerCase().trim();
+  const name = (product.name || '').toLowerCase().trim();
+  const cat = (product.category || '').toLowerCase().trim();
+
+  // If the product explicitly has multiple scents from DB options, variants, or scentNotes,
+  // do not exclude it from scent selection!
+  const hasExplicitScentVariety =
+    (Array.isArray(product.options) &&
+      product.options.some((o) => /scent|fragrance/i.test(o?.name || '') && Array.isArray(o?.values) && o.values.length > 0)) ||
+    (Array.isArray(product.variants) &&
+      new Set(product.variants.map((v) => (v as any)?.scent).filter(Boolean)).size > 0) ||
+    (Array.isArray(product.scentNotes) && product.scentNotes.length > 0);
+
+  if (hasExplicitScentVariety) {
+    return false;
+  }
+
+  // Exclude non-candle product lines immediately if present
+  if (
+    /wax\s*melt|bath\s*bomb|bath\s*soak|soap|slime|candy|chocolate|greeting\s*card/i.test(cat) ||
+    /wax\s*melt|bath\s*bomb|bath\s*soak|soap|slime|candy|chocolate|greeting\s*card/i.test(name)
+  ) {
+    return false;
+  }
+
+  // Exclude distinct specialty candle categories with scents (zodiac, cereal, coffee mug, beer, wine, military, funny, anime, greeting, name, photo, custom, verse, etc.)
+  if (
+    /zodiac|cereal|coffee|mug|beer|wine|military|funny|anime|greeting|name|photo|custom|verse/i.test(cat) ||
+    /zodiac|cereal|coffee|mug|beer|wine|military|funny|anime|greeting|name|photo|custom|verse/i.test(name) ||
+    /zodiac|cereal|coffee|mug|beer|wine|military|funny|anime|greeting|name|photo|custom|verse/i.test(slug)
+  ) {
+    return false;
+  }
+
+  // 1. Jewellery Candles / Jewelry Candles category
+  const isJewelryCandle =
+    cat === 'jewelry candles' ||
+    cat === 'jewellery candles' ||
+    cat === 'cat-jewelry-candles' ||
+    cat === 'jewelry-candles' ||
+    cat === 'jewellery-candles' ||
+    slug.includes('jewelry-candle') ||
+    slug.includes('jewellery-candle') ||
+    id.includes('jewelry-candle') ||
+    id.includes('jewellery-candle') ||
+    /\bjewel(?:l)?ry\s+candles?\b/i.test(name) ||
+    Boolean(APPROVED_COLLECTIONS_MAP['jewelry-candles']?.productHandles?.includes(slug)) ||
+    Boolean(APPROVED_COLLECTIONS_MAP['jewelry-candles']?.productHandles?.includes(id));
+
+  if (isJewelryCandle) return true;
+
+  // 2. Cash Money Candles category (fixed single-scent candles)
+  const isCashMoneyCandle =
+    cat === 'cash money candles' ||
+    cat === 'cat-cash-money-candles' ||
+    cat === 'cash-money-candles' ||
+    slug.includes('cash-money-candle') ||
+    slug.includes('cash-money-candles') ||
+    id.includes('cash-money-candle') ||
+    id.includes('cash-money-candles') ||
+    /\bcash\s+money\s+candles?\b/i.test(name) ||
+    Boolean(APPROVED_COLLECTIONS_MAP['cash-money-candles']?.productHandles?.includes(slug)) ||
+    Boolean(APPROVED_COLLECTIONS_MAP['cash-money-candles']?.productHandles?.includes(id));
+
+  if (isCashMoneyCandle) return true;
+
+  return false;
+}
+
+/**
+ * Utility to strip HTML tags, markdown asterisks, and decode common entities
+ */
+export function cleanPlainText(str?: string): string {
+  return (str || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\*\*|\*/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export interface ShortDescriptionData {
+  shortSummary: string;
+  highlights: string[];
+  hasMore: boolean;
+}
+
+/**
+ * Derives a concise, scannable product overview and key feature bullet points
+ * from the authentic product data without altering or losing source content.
+ */
+export function getShortDescriptionData(product: Product): ShortDescriptionData {
+  const raw = product.description || '';
+  const plain = cleanPlainText(raw);
+
+  let shortSummary = '';
+  if (plain) {
+    const sentences = plain.match(/[^.!?]+[.!?]+(?:\s|$)/g) || [plain];
+    if (sentences.length >= 2 && sentences[0].length < 80) {
+      shortSummary = (sentences[0] + sentences[1]).trim();
+    } else {
+      shortSummary = (sentences[0] || plain).trim();
+    }
+    if (shortSummary.length > 220) {
+      const truncated = shortSummary.slice(0, 210);
+      const lastSpace = truncated.lastIndexOf(' ');
+      shortSummary = (lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated) + '...';
+    }
+  } else {
+    shortSummary =
+      'Crafted with 100% natural organic soy wax, clean aromatic oils, and lead-free cotton wicks for a long-lasting, clean burn. Hand-poured in the USA.';
+  }
+
+  const rawLower = (raw + ' ' + (product.category || '')).toLowerCase();
+
+  const surpriseHighlight =
+    product.surpriseValue ||
+    (product.surpriseType === 'cash'
+      ? 'Guaranteed real $2 bill hidden inside with bonus cash prizes up to $2,500'
+      : product.surpriseType === 'jewelry'
+      ? 'Guaranteed fine jewelry surprise hidden inside appraised from $10 up to $7,500'
+      : 'Guaranteed authentic surprise reveal sealed inside every item');
+
+  let craftHighlight = '100% natural organic soy wax, premium aromatic oils & lead-free cotton wicks';
+  if (/bath bomb|bath salt|sugar scrub|soap/i.test(rawLower)) {
+    craftHighlight = 'Skin-softening formula with pure Epsom salt, rich botanical oils & clean ingredients';
+  } else if (/wax melt/i.test(rawLower)) {
+    craftHighlight = 'Premium coconut-soy wax blend delivering maximum room-filling fragrance throw';
+  } else if (/slime/i.test(rawLower)) {
+    craftHighlight = 'Handcrafted sensory slime with charming mix-in accents & reusable container';
+  }
+
+  let durationHighlight = 'Over 80–100 hours of slow, clean-burning aroma in a reusable glass jar';
+  if (/bath bomb/i.test(rawLower)) {
+    durationHighlight = 'Deeply relaxing aromatherapy soak with rich fizz and soothing skin hydration';
+  } else if (/bath salt|scrub|soap/i.test(rawLower)) {
+    durationHighlight = 'Gentle, moisturizing formula safe for daily self-care rituals';
+  } else if (/wax melt/i.test(rawLower)) {
+    durationHighlight = 'Over 100 hours of long-lasting fragrance enjoyment in standard warmers';
+  } else if (/cereal/i.test(rawLower) && /bowl/i.test(rawLower)) {
+    durationHighlight = 'Comes in a real reusable cereal bowl with spoon after reveal';
+  } else if (/mug|coffee/i.test(rawLower)) {
+    durationHighlight = 'Comes in a real 12 oz enamel coffee mug, reusable after candle burns';
+  }
+
+  const highlights = [
+    surpriseHighlight,
+    craftHighlight,
+    durationHighlight,
+    'Proudly handcrafted in the USA • 100% Win Guarantee',
+  ];
+
+  const hasMore = plain.length > shortSummary.length + 35 || raw.includes('<');
+
+  return { shortSummary, highlights, hasMore };
+}
+
+// Authoritative 20 Scents in exact founder non-alphabetized order
+export const FOUNDER_SCENTS = [
+  'Birthday Cake',
+  'Black Raspberry Vanilla',
+  'Fresh Baked Sugar Cookies',
+  'Baked Apple Pie',
+  'French Vanilla',
+  'Fresh Linen',
+  'Blueberry Muffin',
+  'Cinnamon Apple',
+  'Lavender Vanilla',
+  'Cinnamon Bun',
+  'Bahama Mama',
+  'Calming Lavender',
+  'Strawberry Fields',
+  'Pumpkin Spice',
+  'Jamaican Me Crazy',
+  'Cafe Mocha',
+  'Fresh Cut Roses',
+  'Honeysuckle Jasmine',
+  'Cozy Cabin',
+  'Unscented',
+];
+
+// User-specified 26 Scent Options for Zodiac Cash Candles and customizable items
+export const ZODIAC_SCENT_OPTIONS = [
+  'BIRTHDAY CAKE',
+  'BAHAMA MAMA (TROPICAL)',
+  'BAKED APPLE PIE',
+  'BLACK RASPBERRY VANILLA',
+  'AMAZON RAINFOREST (BASIL SAGE AND MINT)',
+  'CALMING LAVENDER',
+  'CINNAMON APPLE',
+  'BLUEBERRY MUFFIN',
+  'CINNAMON BUN',
+  'CHOCOLATE CHIP COOKIES',
+  'COTTON CANDY',
+  'ALOHA! (TROPICAL)',
+  'LAVENDER VANILLA',
+  'BEDTIME SPA',
+  'FRESH LINEN',
+  'FRESH CUT ROSES',
+  'FRENCH VANILLA',
+  'COZY CABIN',
+  'STRAWBERRY FIELDS',
+  'APPLE MANGO MARTINI',
+  'JAMAICAN ME CRAZY!',
+  'BOMBSHELL (INSPIRED BY VS)',
+  'FRESH BAKED SUGAR COOKIES',
+  'HONEYSUCKLE',
+  'SWEET PEA',
+  'BETTER THAN SEX (CHOCOLATE)',
+];
+
+export const ProductDetails: React.FC<ProductDetailsProps> = ({
+  product: initialProduct,
+  cart = [],
+  wishlistIds = [],
+  onBackToShop,
+  onAddToCart,
+  onUpdateQuantity,
+  onWishlistToggle,
+  onSelectProduct,
+  onOpenCart,
+  onBuyNow,
+  onNavigateToAppraisal,
+  onShowToast,
+}) => {
+  const [activeProduct, setActiveProduct] = useState<Product>(initialProduct);
+
+  useEffect(() => {
+    setActiveProduct(initialProduct);
+  }, [initialProduct]);
+
+  useEffect(() => {
+    const target = initialProduct?.slug || initialProduct?.id;
+    if (target) {
+      productService.getProductBySlug(target, true).then((fresh) => {
+        if (fresh) {
+          setActiveProduct(fresh);
+        }
+      }).catch(() => {});
+    }
+  }, [initialProduct?.slug, initialProduct?.id]);
+
+  const product = activeProduct;
+  const [quantity, setQuantity] = useState(1);
+  const [selectedSize] = useState('Classic 14oz');
+  const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
+  const isCurrentProductWishlisted = wishlistIds.includes(product.id);
+
+  // Reset description expansion state when viewing a different product
+  useEffect(() => {
+    setIsDescriptionExpanded(false);
+  }, [product.id]);
+
+  // Derive concise scannable summary and key benefits from product data
+  const descriptionData = useMemo(() => getShortDescriptionData(product), [product]);
+
+  // Audit dropdown status from spreadsheet: 1 = dropdown, 0 = no dropdown, null = not covered
+  const auditDropdownStatus = useMemo(() => {
+    return getProductDropdownStatus(product);
+  }, [product]);
+
+  // Detect whether this is a jewelry surprise product
+  const isJewelrySurprise = useMemo(() => {
+    // If spreadsheet audit explicitly designates 0 (no dropdown), suppress jewelry selector
+    if (auditDropdownStatus === 0) return false;
+
+    const cat = (product.category || '').toLowerCase();
+    const name = (product.name || '').toLowerCase();
+    const val = (product.surpriseValue || '').toLowerCase();
+
+    // Cash candles, cash wax melts, cash soaps, etc. (unless explicitly a cash + jewelry combo)
+    if (
+      product.surpriseType === 'cash' ||
+      cat.includes('cash') ||
+      (/\bcash\b/i.test(name) && !/\bjewelry\b/i.test(name))
+    ) {
+      return false;
+    }
+
+    if (auditDropdownStatus === 1 && (cat.includes('jewelry') || name.includes('jewelry') || product.surpriseType === 'jewelry')) {
+      return true;
+    }
+
+    if (product.surpriseType === 'jewelry') return true;
+    if (cat.includes('jewelry') || val.includes('jewelry')) return true;
+    if (product.options?.some((o) => isJewelryOrRingOption(o))) return true;
+    return /\b(ring|rings|necklace|necklaces|earring|earrings|bracelet|bracelets|jewelry)\b/i.test(name);
+  }, [product, auditDropdownStatus]);
+
+
+
+
+  // Real-time urgency countdown timer (JewelryCandles conversion style)
+  const [productTimerSecs, setProductTimerSecs] = useState(() => {
+    const now = Date.now();
+    const cycleDuration = 4 * 3600 * 1000 + 38 * 60 * 1000 + 40 * 1000;
+    return Math.floor((cycleDuration - (now % cycleDuration)) / 1000);
+  });
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setProductTimerSecs((prev) => (prev > 1 ? prev - 1 : 4 * 3600));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const pTimerHours = String(Math.floor(productTimerSecs / 3600)).padStart(2, '0');
+  const pTimerMinutes = String(Math.floor((productTimerSecs % 3600) / 60)).padStart(2, '0');
+  const pTimerSeconds = String(productTimerSecs % 60).padStart(2, '0');
+
+  // Dynamic Options (from product schema)
+  const [selectedOptions, setSelectedOptions] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (product.options && product.options.length > 0) {
+      const initial: Record<string, string> = {};
+
+      product.options.forEach((opt) => {
+        if (opt.values && opt.values.length > 0) {
+          initial[opt.name] = opt.values[0];
+        }
+      });
+
+      if (isJewelrySurprise) {
+        setSelectedJewelryType('');
+        setSelectedRingSize(undefined);
+        setRingSizeError(false);
+      } else {
+        setSelectedJewelryType('Ring');
+        setSelectedRingSize(undefined);
+        setRingSizeError(false);
+      }
+      setSelectedOptions(initial);
+    } else {
+      setSelectedOptions({});
+      if (isJewelrySurprise) {
+        setSelectedJewelryType('');
+        setSelectedRingSize(undefined);
+        setRingSizeError(false);
+      }
+    }
+  }, [product.id, product.options, isJewelrySurprise]);
+
+  // Find matching variant based on selected options
+  const matchedVariant = useMemo(() => {
+    if (!product.variants || product.variants.length === 0) return null;
+    if (!product.options || product.options.length === 0) return product.variants[0];
+
+    return (
+      product.variants.find((v) => {
+        if (v.option1Name && selectedOptions[v.option1Name] && v.option1Value !== selectedOptions[v.option1Name]) {
+          return false;
+        }
+        if (v.option2Name && selectedOptions[v.option2Name] && v.option2Value !== selectedOptions[v.option2Name]) {
+          return false;
+        }
+        if (v.option3Name && selectedOptions[v.option3Name] && v.option3Value !== selectedOptions[v.option3Name]) {
+          return false;
+        }
+        return true;
+      }) || product.variants[0]
+    );
+  }, [product.variants, product.options, selectedOptions]);
+
+  const currentPrice = matchedVariant?.price ?? product.price;
+  const currentCompareAtPrice = matchedVariant?.compareAtPrice ?? product.originalPrice;
+  const currentSku = matchedVariant?.sku ?? product.sku;
+  const isVariantInStock = matchedVariant ? matchedVariant.inStock : product.inStock;
+
+  // Jewelry Variant States (Unified Surprise Me Dropdown fallback)
+  const [selectedJewelryType, setSelectedJewelryType] = useState<string>('');
+  const [selectedRingSize, setSelectedRingSize] = useState<number | undefined>(undefined);
+  const [ringSizeError, setRingSizeError] = useState(false);
+  const [isRingSizerOpen, setIsRingSizerOpen] = useState(false);
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Scent Selection States & Logic
+  const isExcludedFromScent = useMemo(() => isScentSelectionExcluded(product), [product]);
+
+  const availableScents = useMemo<string[]>(() => {
+    if (isExcludedFromScent) return [];
+
+    // 1. Direct scent option from product.options (must have authentic variety > 1)
+    const scentOpt = product.options?.find((o) => /scent|fragrance/i.test(o.name));
+    if (scentOpt && Array.isArray(scentOpt.values) && scentOpt.values.length > 1) {
+      return scentOpt.values;
+    }
+
+    // 2. Scents from product variants (must have distinct scent variety > 1)
+    if (Array.isArray(product.variants) && product.variants.length > 1) {
+      const vScents = Array.from(
+        new Set(
+          product.variants
+            .map(
+              (v) =>
+                (v as any).scent ||
+                (v.option1Name && /scent/i.test(v.option1Name) ? v.option1Value : undefined) ||
+                (v.option2Name && /scent/i.test(v.option2Name) ? v.option2Value : undefined) ||
+                (v.option3Name && /scent/i.test(v.option3Name) ? v.option3Value : undefined)
+            )
+            .filter(Boolean)
+        )
+      ) as string[];
+      if (vScents.length > 1) return vScents;
+    }
+
+    // 3. Direct scentNotes from product (must have authentic variety > 1)
+    if (Array.isArray(product.scentNotes) && product.scentNotes.length > 1) {
+      const filtered = product.scentNotes.filter((s) => Boolean(s && String(s).trim()));
+      if (filtered.length > 1) return filtered;
+    }
+
+    // 4. Zodiac Cash Money Candles (the 12 zodiac cash money candles with 26 authentic scents in DB)
+    const slug = (product.slug || '').toLowerCase();
+    const name = (product.name || '').toLowerCase();
+    const isZodiacCashMoneyCandle =
+      /(aquarius|aries|cancer|capricorn|gemini|leo|libra|pisces|sagittarius|scorpio|taurus|virgo)-zodiac-cash(-money)?-candle/i.test(slug) ||
+      (/(aquarius|aries|cancer|capricorn|gemini|leo|libra|pisces|sagittarius|scorpio|taurus|virgo)/i.test(name) && /zodiac\s*cash/i.test(name));
+
+    if (isZodiacCashMoneyCandle) {
+      return ZODIAC_SCENT_OPTIONS;
+    }
+
+    // All products without authentic scent variety in database: REMOVE scent selector completely!
+    return [];
+  }, [product, isExcludedFromScent]);
+
+  const [selectedScent, setSelectedScent] = useState<string>('');
+  const [isScentDropdownOpen, setIsScentDropdownOpen] = useState(false);
+  const [scentSearchQuery, setScentSearchQuery] = useState('');
+  const [scentError, setScentError] = useState(false);
+  const scentDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Initialize selected scent when product changes
+  useEffect(() => {
+    if (availableScents.length > 0) {
+      setSelectedScent(availableScents[0]);
+    } else {
+      setSelectedScent('');
+    }
+    setScentError(false);
+    setIsScentDropdownOpen(false);
+    setScentSearchQuery('');
+  }, [product.id, availableScents]);
+
+  // Close scent dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (scentDropdownRef.current && !scentDropdownRef.current.contains(e.target as Node)) {
+        setIsScentDropdownOpen(false);
+      }
+    };
+    if (isScentDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isScentDropdownOpen]);
+
+  const filteredScents = useMemo(() => {
+    if (!scentSearchQuery.trim()) return availableScents;
+    const q = scentSearchQuery.toLowerCase().trim();
+    return availableScents.filter((s) => s.toLowerCase().includes(q));
+  }, [availableScents, scentSearchQuery]);
+
+  // Other dynamic variety options (excluding jewelry options and scent options)
+  const otherCustomOptions = useMemo(() => {
+    if (!product.options || product.options.length === 0) return [];
+    return product.options.filter((opt) => {
+      const n = (opt.name || '').toLowerCase().trim();
+      if (/scent|fragrance/i.test(n)) return false;
+      if (isJewelryOrRingOption(opt)) return false;
+      if (isJewelrySurprise && n === 'size') return false;
+      return true;
+    });
+  }, [product.options, isJewelrySurprise]);
+
+  // Close custom dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsDropdownOpen(false);
+      }
+    };
+    if (isDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isDropdownOpen]);
+
+  // Available Ring Sizes for this product
+  const availableRingSizes = useMemo(() => {
+    if (product.ringSizes && product.ringSizes.length > 0) {
+      const parsed = product.ringSizes.map(Number).filter((n) => !isNaN(n));
+      if (parsed.length > 0) return parsed;
+    }
+    return RING_SIZES;
+  }, [product.ringSizes]);
+
+  // Unified Surprise Me options matching reference site (jewelrycandles.com)
+  const surpriseMeOptions = useMemo(() => {
+    const list: { value: string; label: string }[] = [
+      { value: 'Surprise me!', label: 'Surprise me!' },
+      { value: 'Bracelet', label: 'Bracelet' },
+      { value: 'Earrings', label: 'Earrings' },
+      { value: 'Necklace', label: 'Necklace' },
+    ];
+    availableRingSizes.forEach((size) => {
+      list.push({
+        value: `Ring Size ${size}`,
+        label: `Ring Size ${size}`,
+      });
+    });
+    return list;
+  }, [availableRingSizes]);
+
+  // Current value displayed inside the unified Surprise Me dropdown
+  const currentDropdownValue = useMemo(() => {
+    if (selectedJewelryType === 'Ring' && selectedRingSize) {
+      return `Ring Size ${selectedRingSize}`;
+    }
+    if (selectedJewelryType === 'Surprise Me' || selectedJewelryType === 'Surprise me!') {
+      return 'Surprise me!';
+    }
+    if (selectedJewelryType && selectedJewelryType !== 'Ring') {
+      return selectedJewelryType;
+    }
+    return '';
+  }, [selectedJewelryType, selectedRingSize]);
+
+  // Unified Surprise Me handler
+  const handleSurpriseMeSelect = (val: string) => {
+    if (!val) {
+      setSelectedJewelryType('');
+      setSelectedRingSize(undefined);
+      setRingSizeError(false);
+      return;
+    }
+    setRingSizeError(false);
+
+    const ringMatch = val.match(/ring\s*size\s*(\d+)/i) || (val.startsWith('Size ') ? val.match(/size\s*(\d+)/i) : null);
+    if (ringMatch) {
+      const sizeNum = parseInt(ringMatch[1], 10);
+      setSelectedJewelryType('Ring');
+      setSelectedRingSize(sizeNum);
+      setSelectedOptions((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((k) => {
+          if (/jewelry|reveal/i.test(k)) delete next[k];
+        });
+        next['Jewelry Reveal Type'] = 'Ring';
+        next['Ring Size'] = String(sizeNum);
+        next['Choose your jewelry surprise'] = val;
+        if (product.options) {
+          product.options.forEach((opt) => {
+            if (isJewelryOrRingOption(opt)) {
+              const matchVal = opt.values?.find(
+                (v) => v.toLowerCase() === val.toLowerCase() || String(v).trim() === String(sizeNum)
+              );
+              if (matchVal) next[opt.name] = matchVal;
+            }
+          });
+        }
+        return next;
+      });
+    } else if (/surprise/i.test(val)) {
+      setSelectedJewelryType('Surprise Me');
+      setSelectedRingSize(undefined);
+      setSelectedOptions((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((k) => {
+          if (/jewelry|reveal|ring/i.test(k)) delete next[k];
+        });
+        next['Jewelry Reveal Type'] = 'Surprise Me';
+        next['Choose your jewelry surprise'] = val;
+        if (product.options) {
+          product.options.forEach((opt) => {
+            if (isJewelryOrRingOption(opt)) {
+              const matchVal = opt.values?.find((v) => /surprise/i.test(v));
+              if (matchVal) next[opt.name] = matchVal;
+            }
+          });
+        }
+        return next;
+      });
+    } else {
+      const cleanType = val.trim();
+      setSelectedJewelryType(cleanType);
+      setSelectedRingSize(undefined);
+      setSelectedOptions((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((k) => {
+          if (/jewelry|reveal|ring/i.test(k)) delete next[k];
+        });
+        next['Jewelry Reveal Type'] = cleanType;
+        next['Choose your jewelry surprise'] = val;
+        if (product.options) {
+          product.options.forEach((opt) => {
+            if (isJewelryOrRingOption(opt)) {
+              const matchVal = opt.values?.find((v) => v.toLowerCase() === cleanType.toLowerCase());
+              if (matchVal) next[opt.name] = matchVal;
+            }
+          });
+        }
+        return next;
+      });
+    }
+  };
+
+  // Consultant Attribution
+  const [rep, setRep] = useState<PublicRepresentative | null>(() =>
+    representativeService.getAttributedRepresentative()
+  );
+
+  // Review System States
+  // Fetch live product reviews from backend
+  useEffect(() => {
+    if (!product?.id) return;
+    reviewService.getProductReviews(product.id).then((res) => {
+      if (res.reviews && res.reviews.length > 0) {
+        setAllReviews((prev) => {
+          const ids = new Set(res.reviews.map((r) => r.id));
+          const rest = prev.filter((r) => !ids.has(r.id));
+          return [...res.reviews, ...rest];
+        });
+      }
+    }).catch(() => {});
+  }, [product?.id]);
+
+  const [allReviews, setAllReviews] = useState<Review[]>(() => {
+    try {
+      const stored = localStorage.getItem(LOCAL_REVIEWS_KEY);
+      const parsed = stored ? JSON.parse(stored) : [];
+      return [...parsed, ...reviewsData];
+    } catch {
+      return reviewsData;
+    }
+  });
+
+  const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
+  const [newRating, setNewRating] = useState<number>(5);
+  const [hoverRating, setHoverRating] = useState<number>(0);
+  const [newTitle, setNewTitle] = useState('');
+  const [newComment, setNewComment] = useState('');
+  const [newAuthor, setNewAuthor] = useState('');
+  const [reviewError, setReviewError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleRep = (e: Event) => {
+      const customEvent = e as CustomEvent<PublicRepresentative | null>;
+      setRep(customEvent.detail || representativeService.getAttributedRepresentative());
+    };
+    window.addEventListener('ils_representative_attributed', handleRep);
+    return () => window.removeEventListener('ils_representative_attributed', handleRep);
+  }, []);
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [product.id]);
+
+  const discountPercent =
+    currentCompareAtPrice && currentCompareAtPrice > currentPrice
+      ? Math.round(((currentCompareAtPrice - currentPrice) / currentCompareAtPrice) * 100)
+      : null;
+
+  // Filter reviews strictly for this product
+  const relevantReviews = useMemo(() => {
+    return allReviews.filter(
+      (r) => r.productId === product.id || r.productName.toLowerCase() === product.name.toLowerCase()
+    );
+  }, [allReviews, product]);
+
+  const productReviewCount = relevantReviews.length > 0 ? relevantReviews.length : (product.reviewCount || 0);
+  const averageRating = useMemo(() => {
+    if (relevantReviews.length > 0) {
+      const sum = relevantReviews.reduce((acc, r) => acc + (r.rating || 5), 0);
+      return Number((sum / relevantReviews.length).toFixed(1));
+    }
+    if (product.reviewCount > 0 && product.rating > 0) {
+      return product.rating;
+    }
+    return 0;
+  }, [relevantReviews, product.reviewCount, product.rating]);
+
+  const { data: relatedItems } = useRelatedProducts(product, 4);
+  const relatedProducts = relatedItems ?? [];
+
+  // Authentic alternate images strictly for THIS product (never cross-pollinating with different products)
+  const alternateImages = useMemo(() => {
+    if (product.images && product.images.length > 1) {
+      return product.images.slice(1);
+    }
+    return [];
+  }, [product.images]);
+
+  const handleAddToCartClick = () => {
+    if (isJewelrySurprise && !currentDropdownValue) {
+      setRingSizeError(true);
+      setIsDropdownOpen(true);
+      onShowToast?.('Please select an option from Surprise Me before adding to cart.', {
+        type: 'info',
+        title: 'Surprise Me Selection Required',
+      });
+      const el = document.getElementById('surprise-me-dropdown-trigger') || document.getElementById('surprise-me-dropdown');
+      if (el) {
+        el.focus();
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return;
+    }
+
+    if (availableScents.length > 0 && !selectedScent) {
+      setScentError(true);
+      setIsScentDropdownOpen(true);
+      onShowToast?.('Please choose a scent option before adding to cart.', {
+        type: 'info',
+        title: 'Scent Selection Required',
+      });
+      const el = document.getElementById('scent-selection-trigger');
+      if (el) {
+        el.focus();
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return;
+    }
+
+    const customizedProduct = {
+      ...product,
+      price: currentPrice,
+      originalPrice: currentCompareAtPrice || undefined,
+      sku: currentSku || undefined,
+    };
+    const optParts: string[] = [];
+    if (availableScents.length > 0 && selectedScent) {
+      optParts.push(`Choose your scent: ${selectedScent}`);
+    }
+    if (product.options && product.options.length > 0) {
+      Object.entries(selectedOptions).forEach(([k, v]) => {
+        const kl = k.toLowerCase().trim();
+        if (kl.includes('scent') || kl.includes('fragrance')) return;
+        if (isJewelryOrRingOption({ name: k, values: [String(v)] })) return;
+        if (isJewelrySurprise && kl === 'size') return;
+        optParts.push(`${k}: ${v}`);
+      });
+    }
+    const formattedSize = optParts.join(', ') || selectedSize || '';
+
+    onAddToCart(customizedProduct, quantity, {
+      selectedRingSize: isJewelrySurprise && selectedJewelryType === 'Ring' ? selectedRingSize : undefined,
+      selectedJewelryType: isJewelrySurprise && selectedJewelryType ? selectedJewelryType : undefined,
+      selectedSize: formattedSize,
+      selectedScent: availableScents.length > 0 && selectedScent ? selectedScent : undefined,
+      'Choose your scent': availableScents.length > 0 && selectedScent ? selectedScent : undefined,
+    } as any);
+  };
+
+  const handleBuyNowClick = () => {
+    if (isJewelrySurprise && !currentDropdownValue) {
+      setRingSizeError(true);
+      setIsDropdownOpen(true);
+      onShowToast?.('Please select an option from Surprise Me before adding to cart.', {
+        type: 'info',
+        title: 'Surprise Me Selection Required',
+      });
+      const el = document.getElementById('surprise-me-dropdown-trigger') || document.getElementById('surprise-me-dropdown');
+      if (el) {
+        el.focus();
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return;
+    }
+
+    if (availableScents.length > 0 && !selectedScent) {
+      setScentError(true);
+      setIsScentDropdownOpen(true);
+      onShowToast?.('Please choose a scent option before adding to cart.', {
+        type: 'info',
+        title: 'Scent Selection Required',
+      });
+      const el = document.getElementById('scent-selection-trigger');
+      if (el) {
+        el.focus();
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return;
+    }
+
+    const customizedProduct = {
+      ...product,
+      price: currentPrice,
+      originalPrice: currentCompareAtPrice || undefined,
+      sku: currentSku || undefined,
+    };
+    const optParts: string[] = [];
+    if (availableScents.length > 0 && selectedScent) {
+      optParts.push(`Choose your scent: ${selectedScent}`);
+    }
+    if (product.options && product.options.length > 0) {
+      Object.entries(selectedOptions).forEach(([k, v]) => {
+        const kl = k.toLowerCase().trim();
+        if (kl.includes('scent') || kl.includes('fragrance')) return;
+        if (isJewelryOrRingOption({ name: k, values: [String(v)] })) return;
+        if (isJewelrySurprise && kl === 'size') return;
+        optParts.push(`${k}: ${v}`);
+      });
+    }
+    const formattedSize = optParts.join(', ') || selectedSize || '';
+
+    const options = {
+      selectedRingSize: isJewelrySurprise && selectedJewelryType === 'Ring' ? selectedRingSize : undefined,
+      selectedJewelryType: isJewelrySurprise && selectedJewelryType ? selectedJewelryType : undefined,
+      selectedSize: formattedSize,
+      selectedScent: availableScents.length > 0 && selectedScent ? selectedScent : undefined,
+      'Choose your scent': availableScents.length > 0 && selectedScent ? selectedScent : undefined,
+    };
+    if (onBuyNow) {
+      onBuyNow(customizedProduct, quantity, options);
+    } else {
+      onAddToCart(customizedProduct, quantity, options);
+      onOpenCart?.();
+    }
+  };
+
+  // Review submission
+  const handleSubmitReview = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newAuthor.trim()) {
+      setReviewError('Please enter your name.');
+      return;
+    }
+    if (!newTitle.trim()) {
+      setReviewError('Please provide a review headline.');
+      return;
+    }
+    if (!newComment.trim() || newComment.trim().length < 10) {
+      setReviewError('Please write at least 10 characters in your review.');
+      return;
+    }
+
+    const createdReview: Review = {
+      id: `rev-user-${Date.now()}`,
+      productId: product.id,
+      productName: product.name,
+      author: newAuthor.trim(),
+      location: 'Verified Buyer',
+      rating: newRating,
+      date: 'Just now',
+      title: newTitle.trim(),
+      comment: newComment.trim(),
+      verified: true,
+      revealedSurprise: isJewelrySurprise
+        ? `Selected Size ${selectedRingSize} Jewelry Reveal`
+        : 'Guaranteed Authentic Prize Inside',
+    };
+
+    const updated = [createdReview, ...allReviews];
+    setAllReviews(updated);
+
+    try {
+      const stored = localStorage.getItem(LOCAL_REVIEWS_KEY);
+      const existingUserReviews: Review[] = stored ? JSON.parse(stored) : [];
+      localStorage.setItem(LOCAL_REVIEWS_KEY, JSON.stringify([createdReview, ...existingUserReviews]));
+
+    reviewService.createReview({
+      productId: product.id,
+      rating: newRating,
+      title: newTitle.trim(),
+      comment: newComment.trim(),
+      customerName: newAuthor.trim(),
+      surpriseType: product.surpriseType,
+      revealedItem: isJewelrySurprise ? `Selected Size ${selectedRingSize} Jewelry Reveal` : 'Guaranteed Authentic Prize Inside',
+    }).catch((err) => console.warn('Backend review create warning:', err));
+    } catch {
+      // fallback
+    }
+
+    onShowToast?.('Thank you! Your verified review has been published.', {
+      title: 'Review Submitted',
+      type: 'success',
+    });
+
+    setIsReviewModalOpen(false);
+    setNewTitle('');
+    setNewComment('');
+    setNewAuthor('');
+    setReviewError(null);
+  };
+
+  return (
+    <div className="w-full max-w-[1460px] mx-auto px-3 sm:px-6 py-4 sm:py-8 overflow-hidden animate-in fade-in duration-300">
+      {/* Breadcrumb Navigation & Back to Shop Action */}
+      <div className="flex items-center justify-between gap-2 mb-6 pb-3 border-b border-[#f2edf1] w-full max-w-full overflow-hidden">
+        <button
+          type="button"
+          onClick={onBackToShop}
+          className="inline-flex items-center gap-1.5 text-xs font-black text-[#D30915] hover:underline cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D30915]/50 rounded-lg px-2 py-1 -ml-2 transition-all active:scale-95"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>Back to All Surprises</span>
+        </button>
+
+        <div className="hidden sm:flex items-center gap-1.5 text-xs text-[#716d77] font-medium">
+          <span>Home</span>
+          <span>/</span>
+          <span>Shop</span>
+          <span>/</span>
+          <span className="text-[#141219] font-bold truncate max-w-[200px]">{product.name}</span>
+        </div>
+      </div>
+
+      {/* Main Product Details Split View */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 xl:gap-10 mb-14 w-full max-w-full overflow-hidden items-start">
+        {/* Left Column: Interactive Image Gallery with Hover Zoom & Lightbox */}
+        <div className="lg:col-span-6 xl:col-span-5 w-full max-w-full overflow-hidden lg:sticky lg:top-[110px] relative">
+          <ProductGallery
+            mainImage={product.image}
+            productName={product.name}
+            alternateImages={alternateImages}
+            badge={product.badge}
+            surpriseValue={product.surpriseValue}
+            category={product.category}
+            slugOrId={product.slug || product.id}
+          />
+          {/* Floating Wishlist Heart on Gallery */}
+          <button
+            type="button"
+            onClick={() => onWishlistToggle(product)}
+            className={`absolute top-3 right-3 w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer shadow-md active:scale-90 z-20 focus-visible:ring-2 focus-visible:ring-[#D30915]/50 focus-visible:outline-none ${
+              isCurrentProductWishlisted
+                ? 'bg-[#fff1f2] border border-[#fecdd3] text-[#D30915] shadow-[0_4px_16px_rgba(211,9,21,0.25)] scale-105'
+                : 'bg-white/95 hover:bg-white text-[#716d77] hover:text-[#D30915] hover:shadow-[0_4px_16px_rgba(211,9,21,0.2)] hover:scale-110 border border-[#eee7ed]'
+            }`}
+            title={isCurrentProductWishlisted ? 'Remove from Wishlist' : 'Save to Wishlist'}
+            aria-label={isCurrentProductWishlisted ? 'Remove from Wishlist' : 'Save to Wishlist'}
+          >
+            <Heart
+              className={`w-5 h-5 transition-all duration-200 ${
+                isCurrentProductWishlisted ? 'fill-[#D30915] text-[#D30915] scale-110' : 'text-[#716d77] hover:text-[#D30915]'
+              }`}
+            />
+          </button>
+        </div>
+
+        {/* Right Column: Product Info, Surprise Card & Purchase Controls */}
+        <div className="lg:col-span-6 xl:col-span-7 flex flex-col justify-between w-full max-w-full overflow-hidden">
+          <div>
+            {/* Category & Ratings Badge */}
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <span className="text-[11px] font-black uppercase tracking-wider text-[#D30915] bg-[#fff1f2] px-3 py-1 rounded-full border border-[#fecdd3]">
+                {product.category}
+              </span>
+
+              {productReviewCount > 0 && averageRating > 0 ? (
+                <div className="flex items-center gap-1 text-xs font-extrabold text-[#141219]">
+                  <div className="flex items-center gap-0.5 text-amber-500">
+                    <Star className="w-3.5 h-3.5 fill-current" />
+                  </div>
+                  <span>{averageRating.toFixed(1)}</span>
+                  <span className="text-[#8a858f] font-normal">
+                    ({productReviewCount} verified {productReviewCount === 1 ? 'review' : 'reviews'})
+                  </span>
+                </div>
+              ) : (
+                <span className="text-[11px] font-medium text-[#8a858f]">No reviews yet</span>
+              )}
+            </div>
+
+            {/* Representative Endorsement Pill */}
+            {rep && (
+              <div className="mb-3 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#fff5f6] border border-[#ffd8dc]">
+                <img
+                  src={rep.avatar}
+                  alt={rep.name}
+                  className="w-4 h-4 rounded-full object-cover ring-1 ring-[#D30915]/40"
+                />
+                <span className="text-[11px] text-[#645c68]">
+                  Shopping with <strong className="text-[#141219] font-bold">{rep.name}</strong>
+                </span>
+              </div>
+            )}
+
+            {/* Product Title */}
+            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-black text-[#141219] tracking-tight leading-tight m-0 mb-3 font-display">
+              {product.name}
+            </h1>
+
+            {/* Price & Savings Pill */}
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3 mb-3">
+              <div className="text-2xl sm:text-3xl font-black text-[#141219]">
+                ${currentPrice.toFixed(2)}
+              </div>
+
+              {currentCompareAtPrice && currentCompareAtPrice > currentPrice && (
+                <div className="text-sm sm:text-base text-[#8a858f] line-through font-medium">
+                  ${currentCompareAtPrice.toFixed(2)}
+                </div>
+              )}
+
+              {discountPercent && (
+                <span className="px-2.5 py-0.5 rounded-full bg-[#D30915] text-white text-[10.5px] sm:text-xs font-black uppercase tracking-wider shrink-0 shadow-2xs">
+                  Save {discountPercent}%
+                </span>
+              )}
+
+              <span className={`text-[10.5px] sm:text-xs font-bold px-2.5 py-0.5 rounded-full border shrink-0 ${
+                isVariantInStock
+                  ? 'text-emerald-700 bg-emerald-50 border-emerald-200'
+                  : 'text-rose-700 bg-rose-50 border-rose-200'
+              }`}>
+                {isVariantInStock ? 'In Stock & Ready to Ship' : 'Out of Stock'}
+              </span>
+            </div>
+
+            {/* Authoritative SKU display (Preserve blank/null if blank/null in authoritative source) */}
+            {currentSku && (
+              <div className="text-[11px] text-[#8a858f] font-mono mb-3">
+                SKU: <span className="text-[#36323b] font-bold">{currentSku}</span>
+              </div>
+            )}
+
+
+
+            {/* Scent / Fragrance Option Dropdown Selector */}
+            {availableScents.length > 0 && (
+              <div className="mb-5">
+                <div className="flex items-center justify-between mb-2">
+                  <label
+                    htmlFor="scent-selection-trigger"
+                    className="text-xs sm:text-[13px] font-black uppercase tracking-wider text-[#141219] flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <span>Choose your scent:</span>
+                    <span className="text-[#D30915]">*</span>
+                  </label>
+                  {selectedScent && (
+                    <span className="text-[11px] font-bold text-[#D30915] bg-[#fff1f2] px-2 py-0.5 rounded-full border border-[#fecdd3]">
+                      Selected
+                    </span>
+                  )}
+                </div>
+
+                <div ref={scentDropdownRef} className="relative">
+                  {/* Synchronized accessible select matching website custom-select structure */}
+                  <select
+                    id="choose-your-scent-select"
+                    aria-label="Choose your scent"
+                    value={selectedScent}
+                    onChange={(e) => {
+                      setSelectedScent(e.target.value);
+                      setScentError(false);
+                    }}
+                    className="sr-only"
+                    tabIndex={-1}
+                  >
+                    <option value="" disabled>Choose your scent</option>
+                    {availableScents.map((scent) => (
+                      <option key={scent} value={scent}>
+                        {scent}
+                      </option>
+                    ))}
+                  </select>
+
+                  <button
+                    type="button"
+                    id="scent-selection-trigger"
+                    aria-haspopup="listbox"
+                    aria-expanded={isScentDropdownOpen}
+                    onClick={() => {
+                      setIsScentDropdownOpen((prev) => !prev);
+                      setScentError(false);
+                    }}
+                    className={`w-full h-[50px] px-4 rounded-[14px] font-black text-xs sm:text-sm text-left flex items-center justify-between gap-3 transition-all cursor-pointer outline-none shadow-xs border-0 ${
+                      scentError
+                        ? 'border-2 border-red-500 ring-2 ring-red-500/20 bg-red-50 text-red-900'
+                        : 'bg-[#ffe4e8] text-[#9f1239] hover:bg-[#ffdce2]'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 truncate">
+                      <span className="text-base">🕯️</span>
+                      <span className="truncate">{selectedScent || 'Choose your scent'}</span>
+                    </div>
+                    <div
+                      className={`w-7 h-7 rounded-full bg-[#D30915] text-white flex items-center justify-center shrink-0 shadow-xs transition-transform duration-200 ${
+                        isScentDropdownOpen ? 'rotate-180' : ''
+                      }`}
+                    >
+                      <ChevronDown className="w-4 h-4 stroke-[2.5]" />
+                    </div>
+                  </button>
+
+                  {/* Dropdown Menu */}
+                  {isScentDropdownOpen && (
+                    <div
+                      role="listbox"
+                      className="absolute z-50 left-0 right-0 mt-1.5 p-2.5 rounded-[14px] bg-white border border-[#fee2e8] shadow-[0_12px_32px_rgba(20,18,25,0.12)] max-h-[360px] overflow-y-auto divide-y divide-[#fee2e8] animate-in fade-in-0 zoom-in-95 duration-150"
+                    >
+                      {availableScents.length > 8 && (
+                        <div className="p-1 pb-2">
+                          <div className="relative">
+                            <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                            <input
+                              type="text"
+                              placeholder="Search scents..."
+                              value={scentSearchQuery}
+                              onChange={(e) => setScentSearchQuery(e.target.value)}
+                              className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-gray-200 focus:outline-none focus:border-[#D30915] font-medium"
+                              onClick={(e) => e.stopPropagation()}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="py-1 space-y-1 max-h-[260px] overflow-y-auto">
+                        {filteredScents.length > 0 ? (
+                          filteredScents.map((scent) => {
+                            const isSelected = selectedScent === scent;
+                            return (
+                              <button
+                                key={scent}
+                                type="button"
+                                role="option"
+                                aria-selected={isSelected}
+                                onClick={() => {
+                                  setSelectedScent(scent);
+                                  setIsScentDropdownOpen(false);
+                                  setScentError(false);
+                                  setScentSearchQuery('');
+                                }}
+                                className={`w-full px-3 py-2.5 rounded-[10px] flex items-center justify-between text-left transition-all cursor-pointer ${
+                                  isSelected
+                                    ? 'bg-[#ffe4e8] text-[#D30915] font-black ring-1 ring-[#D30915]/20 shadow-2xs'
+                                    : 'bg-[#fffafc] text-[#141219] hover:bg-[#fff0f4] hover:text-[#D30915]'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2 truncate">
+                                  <span className="text-sm">🌸</span>
+                                  <span className="text-xs sm:text-sm font-bold truncate">{scent}</span>
+                                </div>
+                                {isSelected && <Check className="w-3.5 h-3.5 text-[#D30915] shrink-0 stroke-[2.5]" />}
+                              </button>
+                            );
+                          })
+                        ) : (
+                          <div className="px-3 py-3 text-xs text-gray-500 text-center font-medium">
+                            No scents found matching "{scentSearchQuery}"
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {scentError && (
+                  <p className="text-[11px] text-red-600 font-bold m-0 mt-1.5 flex items-center gap-1 animate-in fade-in">
+                    <span>Please choose a scent option before adding to cart.</span>
+                  </p>
+                )}
+
+                {selectedScent && (
+                  <p className="text-[11px] text-[#716d77] m-0 mt-2 font-medium flex items-center gap-1">
+                    <span>✨ Hand-poured with pure aromatic oils in <strong className="text-[#141219]">{selectedScent}</strong>.</span>
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Other Dynamic Custom Variety Options (Candy, Chocolate, etc.) */}
+            {otherCustomOptions.length > 0 && (
+              <div className="space-y-4 mb-5">
+                {otherCustomOptions.map((opt) => (
+                  <div key={opt.name}>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs sm:text-[13px] font-black uppercase tracking-wider text-[#141219] flex items-center gap-1 cursor-pointer">
+                        <span>{opt.name}:</span>
+                        <span className="text-[#D30915]">*</span>
+                      </label>
+                      {selectedOptions[opt.name] && (
+                        <span className="text-[11px] font-bold text-[#D30915] bg-[#fff1f2] px-2 py-0.5 rounded-full border border-[#fecdd3]">
+                          Selected
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {opt.values.map((val) => {
+                        const isSel = selectedOptions[opt.name] === val;
+                        return (
+                          <button
+                            key={val}
+                            type="button"
+                            onClick={() => setSelectedOptions((prev) => ({ ...prev, [opt.name]: val }))}
+                            className={`px-3 py-2 rounded-[12px] text-xs font-bold transition-all text-left flex items-center justify-between gap-1.5 cursor-pointer ${
+                              isSel
+                                ? 'bg-[#ffe4e8] text-[#D30915] ring-2 ring-[#D30915]/30 font-black shadow-xs'
+                                : 'bg-[#fffafc] text-[#141219] border border-[#fee2e8] hover:bg-[#fff0f4] hover:text-[#D30915]'
+                            }`}
+                          >
+                            <span className="truncate">{val}</span>
+                            {isSel && <Check className="w-3.5 h-3.5 text-[#D30915] shrink-0 stroke-[2.5]" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {isJewelrySurprise && (
+              <div className="mb-5">
+                <div className="flex items-center justify-between mb-2">
+                  <label
+                    htmlFor="surprise-me-dropdown-trigger"
+                    className="text-xs sm:text-[13px] font-black uppercase tracking-wider text-[#141219] flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>Surprise Me:</span>
+                    <span className="text-[#D30915]">*</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setIsRingSizerOpen(true)}
+                    className="text-xs font-bold text-[#D30915] hover:text-[#B60711] hover:underline inline-flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <span>Size Guide</span>
+                  </button>
+                </div>
+
+                <div ref={dropdownRef} className="relative">
+                  {/* Synchronized accessible native select (strictly hidden so no corner artifacts leak) */}
+                  <select
+                    id="surprise-me-dropdown"
+                    value={currentDropdownValue}
+                    onChange={(e) => handleSurpriseMeSelect(e.target.value)}
+                    className="hidden"
+                    style={{ display: 'none' }}
+                    tabIndex={-1}
+                    aria-hidden="true"
+                  >
+                    <option value="" disabled>Select Surprise Me</option>
+                    {surpriseMeOptions.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* Dropdown Trigger Button */}
+                  <button
+                    type="button"
+                    id="surprise-me-dropdown-trigger"
+                    aria-haspopup="listbox"
+                    aria-expanded={isDropdownOpen}
+                    onClick={() => {
+                      setIsDropdownOpen((prev) => !prev);
+                      setRingSizeError(false);
+                    }}
+                    className={`w-full h-[50px] px-4 rounded-[14px] font-black text-xs sm:text-sm text-left flex items-center justify-between gap-3 transition-all cursor-pointer outline-none shadow-xs border-0 ${
+                      ringSizeError
+                        ? 'border-2 border-red-500 ring-2 ring-red-500/20 bg-red-50 text-red-900'
+                        : 'bg-[#ffe4e8] text-[#9f1239] hover:bg-[#ffdce2]'
+                    }`}
+                  >
+                    <span className="truncate">
+                      {currentDropdownValue || 'Select Surprise Me'}
+                    </span>
+                    <div
+                      className={`w-7 h-7 rounded-full bg-[#D30915] text-white flex items-center justify-center shrink-0 shadow-xs transition-transform duration-200 ${
+                        isDropdownOpen ? 'rotate-180' : ''
+                      }`}
+                    >
+                      <ChevronDown className="w-4 h-4 stroke-[2.5]" />
+                    </div>
+                  </button>
+
+                  {/* Styled Dropdown Menu (Inside Ring Sizes and Others) */}
+                  {isDropdownOpen && (
+                    <div
+                      role="listbox"
+                      className="absolute z-50 left-0 right-0 mt-1.5 p-2.5 rounded-[14px] bg-white border border-[#fee2e8] shadow-[0_12px_32px_rgba(20,18,25,0.12)] max-h-[360px] overflow-y-auto divide-y divide-[#fee2e8] animate-in fade-in-0 zoom-in-95 duration-150"
+                    >
+                      {/* Section 1: Surprise Me / Mystery Reveal */}
+                      <div className="pb-2">
+                        <div className="px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-[#9f1239]/70 flex items-center justify-between">
+                          <span>Mystery Surprise</span>
+                          <span className="text-[#D30915] font-extrabold text-[10px]">Appraised $15–$7,500</span>
+                        </div>
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={currentDropdownValue === 'Surprise me!'}
+                          onClick={() => {
+                            handleSurpriseMeSelect('Surprise me!');
+                            setIsDropdownOpen(false);
+                          }}
+                          className={`w-full px-3 py-2.5 rounded-[12px] flex items-center justify-between text-left transition-all cursor-pointer ${
+                            currentDropdownValue === 'Surprise me!'
+                              ? 'bg-[#ffe4e8] text-[#D30915] font-black'
+                              : 'text-[#141219] hover:bg-[#fff0f3] hover:text-[#D30915]'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-base leading-none">✨</span>
+                            <div>
+                              <span className="text-xs sm:text-sm font-bold block">Surprise me!</span>
+                              <span className="text-[10px] text-[#716d77] block font-medium">Random fine jewelry reveal hidden inside</span>
+                            </div>
+                          </div>
+                          {currentDropdownValue === 'Surprise me!' && (
+                            <Check className="w-4 h-4 text-[#D30915] shrink-0 stroke-[2.5]" />
+                          )}
+                        </button>
+                      </div>
+
+                      {/* Section 2: Ring Sizes ("rogn") */}
+                      <div className="py-2">
+                        <div className="px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-[#9f1239]/70 flex items-center justify-between">
+                          <span>💍 Ring Sizes (US)</span>
+                          <span className="text-[#D30915] font-extrabold text-[10px]">Sizes 5 to 11</span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 p-1">
+                          {availableRingSizes.map((size) => {
+                            const val = `Ring Size ${size}`;
+                            const isSelected = currentDropdownValue === val;
+                            return (
+                              <button
+                                key={size}
+                                type="button"
+                                role="option"
+                                aria-selected={isSelected}
+                                onClick={() => {
+                                  handleSurpriseMeSelect(val);
+                                  setIsDropdownOpen(false);
+                                }}
+                                className={`px-3 py-2 rounded-[10px] flex items-center justify-between text-left transition-all cursor-pointer ${
+                                  isSelected
+                                    ? 'bg-[#ffe4e8] text-[#D30915] font-black shadow-xs ring-1 ring-[#D30915]/20'
+                                    : 'bg-[#fffafc] text-[#141219] hover:bg-[#fff0f4] hover:text-[#D30915]'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm">💍</span>
+                                  <span className="text-xs sm:text-sm font-bold">Ring Size {size}</span>
+                                </div>
+                                {isSelected && <Check className="w-3.5 h-3.5 text-[#D30915] shrink-0 stroke-[2.5]" />}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Section 3: Other Jewelry Pieces ("and others") */}
+                      <div className="pt-2">
+                        <div className="px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-[#9f1239]/70">
+                          <span>💎 Other Jewelry Reveal Types</span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 p-1">
+                          {[
+                            { piece: 'Necklace', icon: '📿' },
+                            { piece: 'Earrings', icon: '✨' },
+                            { piece: 'Bracelet', icon: '💫' },
+                          ].map(({ piece, icon }) => {
+                            const isSelected = currentDropdownValue === piece;
+                            return (
+                              <button
+                                key={piece}
+                                type="button"
+                                role="option"
+                                aria-selected={isSelected}
+                                onClick={() => {
+                                  handleSurpriseMeSelect(piece);
+                                  setIsDropdownOpen(false);
+                                }}
+                                className={`px-3 py-2 rounded-[10px] flex items-center justify-between text-left transition-all cursor-pointer ${
+                                  isSelected
+                                    ? 'bg-[#ffe4e8] text-[#D30915] font-black shadow-xs ring-1 ring-[#D30915]/20'
+                                    : 'bg-[#fffafc] text-[#141219] hover:bg-[#fff0f4] hover:text-[#D30915]'
+                                }`}
+                              >
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-sm">{icon}</span>
+                                  <span className="text-xs sm:text-sm font-bold">{piece}</span>
+                                </div>
+                                {isSelected && <Check className="w-3.5 h-3.5 text-[#D30915] shrink-0 stroke-[2.5]" />}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {ringSizeError && (
+                  <p className="text-[11px] text-red-600 font-bold m-0 mt-1.5 flex items-center gap-1 animate-in fade-in">
+                    <span>Please select an option from Surprise Me before adding to cart.</span>
+                  </p>
+                )}
+
+                {currentDropdownValue ? (
+                  <p className="text-[11px] text-[#716d77] m-0 mt-2 font-medium flex items-center gap-1">
+                    <span>
+                      {selectedJewelryType === 'Ring' && selectedRingSize
+                        ? `✨ Your ring surprise will be tailored in Size ${selectedRingSize} appraised $15 to $7,500.`
+                        : selectedJewelryType === 'Surprise Me'
+                        ? '✨ Guaranteed random fine jewelry surprise hidden inside each candle appraised $15 to $7,500.'
+                        : `✨ Guaranteed authentic ${selectedJewelryType} surprise hidden inside each candle appraised $15 to $7,500.`}
+                    </span>
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-[#8a858f] m-0 mt-1.5 font-medium">
+                    Standard US ring sizes (5 to 11), Necklace, Earrings, Bracelet, or Surprise Me.
+                  </p>
+                )}
+
+                {onNavigateToAppraisal && (
+                  <button
+                    type="button"
+                    onClick={onNavigateToAppraisal}
+                    className="mt-2 text-xs font-bold text-[#D30915] hover:text-[#B60711] hover:underline inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <Gem className="w-3.5 h-3.5" />
+                    <span>Already revealed your jewelry? Check appraisal value & certificate →</span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Quantity Stepper, Add to Cart & Buy It Now Controls */}
+            {/* Placed immediately below Price for dropdown = 0, or immediately below Dropdown for dropdown = 1 */}
+            <div className="space-y-2.5 sm:space-y-3 mb-5 pt-3 border-t border-[#f2edf1]">
+              {/* Row 1: Quantity Stepper & ADD TO CART Button */}
+              <div className="flex items-center gap-2 sm:gap-2.5 w-full">
+                {/* Stepper with Curved Pill Background */}
+                <div
+                  className={`flex items-center shrink-0 h-[48px] sm:h-[50px] w-[105px] sm:w-[120px] rounded-full bg-[#D30915] text-white transition-all shadow-xs overflow-hidden ${
+                    !isVariantInStock ? 'opacity-50 pointer-events-none' : ''
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setQuantity((q) => Math.max(1, q - 1))}
+                    disabled={quantity <= 1 || !isVariantInStock}
+                    className="w-8 sm:w-9 h-full pl-2.5 pr-1 flex items-center justify-center text-white/90 hover:text-white hover:bg-black/15 active:scale-90 transition-all cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed focus-visible:outline-none select-none"
+                    aria-label="Decrease quantity"
+                  >
+                    <Minus className="w-3.5 sm:w-4 h-3.5 sm:h-4 stroke-[2.5]" />
+                  </button>
+
+                  <span className="flex-1 text-center font-bold text-sm sm:text-[15px] text-white select-none whitespace-nowrap">
+                    {quantity}
+                  </span>
+
+                  <button
+                    type="button"
+                    onClick={() => setQuantity((q) => q + 1)}
+                    disabled={!isVariantInStock}
+                    className="w-8 sm:w-9 h-full pr-2.5 pl-1 flex items-center justify-center text-white/90 hover:text-white hover:bg-black/15 active:scale-90 transition-all cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed focus-visible:outline-none select-none"
+                    aria-label="Increase quantity"
+                  >
+                    <Plus className="w-3.5 sm:w-4 h-3.5 sm:h-4 stroke-[2.5]" />
+                  </button>
+                </div>
+
+                {/* ADD TO CART Button with Curved Pill Edge - Single Straight Line */}
+                <button
+                  type="button"
+                  onClick={handleAddToCartClick}
+                  disabled={!isVariantInStock}
+                  className={`flex-1 h-[48px] sm:h-[50px] px-4 sm:px-6 rounded-full text-xs sm:text-sm font-bold sm:font-extrabold uppercase tracking-normal transition-all duration-200 flex items-center justify-center min-w-0 shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D30915]/50 focus-visible:ring-offset-1 select-none whitespace-nowrap ${
+                    isVariantInStock
+                      ? 'bg-[#D30915] hover:bg-[#B60711] text-white hover:shadow-[0_4px_16px_rgba(211,9,21,0.25)] active:scale-[0.99] cursor-pointer'
+                      : 'bg-stone-300 text-stone-500 cursor-not-allowed opacity-75'
+                  }`}
+                >
+                  <span className="whitespace-nowrap">
+                    {isVariantInStock ? 'ADD TO CART' : 'OUT OF STOCK'}
+                  </span>
+                </button>
+              </div>
+
+              {/* Row 2: BUY IT NOW Button with Curved Pill Edge - Single Straight Line */}
+              <div>
+                <button
+                  type="button"
+                  onClick={handleBuyNowClick}
+                  disabled={!isVariantInStock}
+                  className={`w-full h-[48px] sm:h-[50px] px-4 sm:px-6 rounded-full text-xs sm:text-sm font-bold sm:font-extrabold uppercase tracking-normal transition-all duration-200 flex items-center justify-center shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#141219]/50 focus-visible:ring-offset-1 select-none whitespace-nowrap ${
+                    isVariantInStock
+                      ? 'bg-[#141219] hover:bg-[#231f2d] text-white hover:shadow-[0_4px_16px_rgba(20,18,25,0.2)] active:scale-[0.99] cursor-pointer'
+                      : 'bg-stone-200 text-stone-400 cursor-not-allowed opacity-75'
+                  }`}
+                >
+                  <span className="whitespace-nowrap">{isVariantInStock ? 'BUY IT NOW' : 'SOLD OUT'}</span>
+                </button>
+              </div>
+
+              {/* More Payment Options Link */}
+              <div className="text-center pt-0.5">
+                <button
+                  type="button"
+                  onClick={handleBuyNowClick}
+                  className="text-[11px] sm:text-xs text-[#716d77] hover:text-[#141219] underline underline-offset-2 font-medium cursor-pointer transition-colors"
+                >
+                  More payment options
+                </button>
+              </div>
+            </div>
+
+            {/* Product Details & Experience (Shortened, Scannable & Expandable) - Placed below Add to Cart / Buy Now */}
+            <div className="mb-5 pt-3 border-t border-[#f2edf1]">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="block text-[11px] font-black uppercase tracking-wider text-[#8a858f]">
+                  Product Details &amp; Experience
+                </span>
+                {descriptionData.hasMore && (
+                  <button
+                    type="button"
+                    onClick={() => setIsDescriptionExpanded((prev) => !prev)}
+                    className="text-[11px] font-bold text-[#D30915] hover:text-[#B60711] hover:underline inline-flex items-center gap-1 cursor-pointer transition-colors"
+                    aria-expanded={isDescriptionExpanded}
+                  >
+                    <span>{isDescriptionExpanded ? 'Show Less Details' : 'Read Full Description'}</span>
+                    <ChevronDown
+                      className={`w-3.5 h-3.5 transition-transform duration-200 ${
+                        isDescriptionExpanded ? 'rotate-180' : ''
+                      }`}
+                    />
+                  </button>
+                )}
+              </div>
+
+              {/* Concise Primary Summary Paragraph */}
+              <p className="text-xs sm:text-sm text-[#55505a] leading-relaxed m-0 font-medium mb-2.5">
+                {descriptionData.shortSummary}
+              </p>
+
+              {/* Amazon-Style Key Benefits / Scannable Bullet Points */}
+              <ul className="text-xs sm:text-[13px] text-[#55505a] space-y-1.5 mb-2 pl-0 list-none font-medium">
+                {descriptionData.highlights.map((highlight, idx) => (
+                  <li key={idx} className="flex items-start gap-2">
+                    <span className="text-[#D30915] font-black text-sm leading-none shrink-0 mt-0.5">•</span>
+                    <span className="leading-snug">{highlight}</span>
+                  </li>
+                ))}
+              </ul>
+
+              {/* Expandable Full Authoritative Description (Preserves all HTML & rich details) */}
+              {descriptionData.hasMore && isDescriptionExpanded && (
+                <div className="mt-3 pt-3 border-t border-[#f2edf1] text-xs sm:text-sm text-[#55505a] leading-relaxed font-medium space-y-2 animate-in fade-in duration-200">
+                  {product.description && product.description.includes('<') ? (
+                    <div
+                      className="space-y-2 [&_p]:mb-2 [&_ul]:list-disc [&_ul]:pl-5 [&_li]:mb-1 [&_iframe]:w-full [&_iframe]:max-w-[560px] [&_iframe]:aspect-video [&_iframe]:rounded-xl [&_iframe]:my-3"
+                      dangerouslySetInnerHTML={{ __html: product.description }}
+                    />
+                  ) : (
+                    <p className="m-0 leading-relaxed font-medium">
+                      {product.description ||
+                        'Crafted with 100% natural organic soy wax, clean aromatic oils, and lead-free cotton wicks for a long-lasting, clean burn. Hand-poured in the USA.'}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 4 Guarantees Strip */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-2 xl:grid-cols-4 gap-2 p-3 rounded-[16px] bg-[#fffafc] border border-[#f2e6ee] text-[11px] font-bold text-[#55505a] mb-4">
+              <div className="flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>100% Win Guarantee</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <Truck className="w-4 h-4 text-amber-500 shrink-0" />
+                <span>Free Shipping ${FREE_SHIPPING_THRESHOLD}+</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <RotateCcw className="w-4 h-4 text-blue-600 shrink-0" />
+                <span>{RETURN_POLICY_LABEL}</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-[#D30915] shrink-0" />
+                <span>Made in USA</span>
+              </div>
+            </div>
+
+            {/* Real-time Urgency Countdown Timer (JewelryCandles Conversion Feature) */}
+            <div className="mb-4 p-3 sm:p-3.5 rounded-[16px] bg-gradient-to-r from-[#fff1f2] via-[#fff7f8] to-[#fff1f2] border border-[#fecdd3] flex items-center justify-between gap-2 shadow-2xs">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-8 h-8 rounded-full bg-[#D30915] text-white flex items-center justify-center shrink-0 shadow-2xs">
+                  <Clock className="w-4 h-4 animate-spin-slow" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[11px] sm:text-xs font-black text-[#141219] uppercase tracking-wider flex items-center gap-1.5 truncate">
+                    <span>Limited Surprise Batch</span>
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#D30915] animate-ping" />
+                  </div>
+                  <div className="text-[10.5px] sm:text-[11px] text-[#716d77] font-medium truncate">
+                    Order in next {pTimerHours}h {pTimerMinutes}m to ship today!
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1 shrink-0 font-mono">
+                <div className="bg-[#141219] text-white px-2 py-1 rounded-[8px] text-xs font-black text-center min-w-[28px]">
+                  {pTimerHours}h
+                </div>
+                <span className="font-bold text-[#D30915]">:</span>
+                <div className="bg-[#141219] text-white px-2 py-1 rounded-[8px] text-xs font-black text-center min-w-[28px]">
+                  {pTimerMinutes}m
+                </div>
+                <span className="font-bold text-[#D30915]">:</span>
+                <div className="bg-[#D30915] text-white px-2 py-1 rounded-[8px] text-xs font-black text-center min-w-[28px] animate-pulse">
+                  {pTimerSeconds}s
+                </div>
+              </div>
+            </div>
+
+            {/* Surprise Reveal Guarantee Feature Card */}
+            <div className="p-4 rounded-[18px] bg-gradient-to-r from-[#fff5f5] via-[#fff8fb] to-[#fff5f5] border border-[#fecdd3] mb-4 shadow-2xs">
+              <div className="flex items-center gap-2 mb-1.5">
+                <div className="w-7 h-7 rounded-full bg-[#D30915] text-white flex items-center justify-center shrink-0">
+                  {product.surpriseType === 'cash' ? (
+                    <DollarSign className="w-4 h-4 stroke-[3]" />
+                  ) : (
+                    <Gem className="w-4 h-4" />
+                  )}
+                </div>
+                <div>
+                  <h4 className="text-xs sm:text-sm font-black text-[#141219] m-0 leading-tight">
+                    {product.surpriseType === 'cash'
+                      ? 'Guaranteed Real Cash Prize Inside'
+                      : 'Guaranteed Fine Jewelry Inside'}
+                  </h4>
+                  <p className="text-[11px] text-[#D30915] font-black m-0">
+                    {product.surpriseValue || 'Authentic Reveal in Every Jar'}
+                  </p>
+                </div>
+              </div>
+              <p className="text-xs text-[#55505a] leading-relaxed m-0 font-medium pl-9">
+                Every single handcrafted product holds a sealed, waterproof, heat-resistant capsule with your guaranteed surprise. Burn or unwrap to reveal your treasure!
+              </p>
+            </div>
+
+
+          </div>
+        </div>
+      </div>
+
+      {/* SECTION 2 REQUIREMENT: PRODUCT REVIEWS SECTION */}
+      <section className="mb-14 pt-8 border-t border-[#f2edf1]">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+          <div>
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#fff1f2] border border-[#fecdd3] text-[#D30915] text-xs font-black uppercase tracking-wider mb-2">
+              <Star className="w-3.5 h-3.5 fill-current" />
+              <span>Verified Customer Feedback</span>
+            </div>
+            <h2 className="text-2xl sm:text-3xl font-black text-[#141219] font-display m-0">
+              Customer Reviews &amp; Reveal Stories
+            </h2>
+            <p className="text-xs sm:text-sm text-[#716d77] m-0 mt-1">
+              Authentic unboxings and genuine jewelry &amp; cash reveals from real buyers.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setIsReviewModalOpen(true)}
+            className="px-5 py-3 rounded-2xl bg-[#D30915] hover:bg-[#b80712] text-white text-xs sm:text-sm font-black uppercase tracking-wider shadow-sm hover:shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer self-start md:self-auto"
+          >
+            <MessageSquare className="w-4 h-4" />
+            <span>Write a Review</span>
+          </button>
+        </div>
+
+        {/* Rating Breakdown & Summary Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 mb-8">
+          {/* Rating Summary Card */}
+          <div className="lg:col-span-4 p-6 rounded-3xl bg-[#fffbfd] border border-[#eedbe6] flex flex-col justify-between space-y-4">
+            <div>
+              <span className="text-xs font-black uppercase tracking-wider text-[#716d77] block mb-1">
+                Overall Customer Rating
+              </span>
+              {productReviewCount > 0 && averageRating > 0 ? (
+                <>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-4xl sm:text-5xl font-black text-[#141219] font-display">
+                      {averageRating.toFixed(1)}
+                    </span>
+                    <span className="text-base font-bold text-[#8a858f]">/ 5.0</span>
+                  </div>
+                  <div className="flex items-center gap-1 my-2 text-amber-500">
+                    {[1, 2, 3, 4, 5].map((s) => (
+                      <Star
+                        key={s}
+                        className={`w-5 h-5 ${s <= Math.round(averageRating) ? 'fill-current text-amber-500' : 'text-gray-300'}`}
+                      />
+                    ))}
+                  </div>
+                  <p className="text-xs text-[#716d77] m-0">
+                    Based on <strong>{productReviewCount}</strong> authentic customer {productReviewCount === 1 ? 'unboxing' : 'unboxings'}
+                  </p>
+                </>
+              ) : (
+                <div className="py-2">
+                  <div className="text-lg font-bold text-[#141219]">No reviews yet</div>
+                  <p className="text-xs text-[#716d77] m-0 mt-1">
+                    This product has not received verified customer reviews yet.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="pt-4 border-t border-[#f0dce6] space-y-1.5 text-xs">
+              <div className="flex items-center justify-between text-[#141219] font-bold">
+                <span>100% Win Guarantee</span>
+                <span className="text-emerald-700">Verified ✓</span>
+              </div>
+              <div className="flex items-center justify-between text-[#141219] font-bold">
+                <span>{product.surpriseType === 'cash' ? 'Cash Prize Inside' : 'Appraised Jewelry Inside'}</span>
+                <span className="text-[#D30915]">{product.surpriseType === 'cash' ? '$2 - $2,500' : '$10 - $7,500'}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Star Breakdown Bars */}
+          <div className="lg:col-span-8 p-6 rounded-3xl bg-white border border-[#eedbe6] space-y-3 flex flex-col justify-center">
+            {productReviewCount > 0 ? (
+              [
+                { stars: 5, pct: 88, count: Math.round(productReviewCount * 0.88) },
+                { stars: 4, pct: 9, count: Math.round(productReviewCount * 0.09) },
+                { stars: 3, pct: 2, count: Math.round(productReviewCount * 0.02) },
+                { stars: 2, pct: 1, count: Math.round(productReviewCount * 0.01) },
+                { stars: 1, pct: 0, count: 0 },
+              ].map((bar) => (
+                <div key={bar.stars} className="flex items-center gap-3 text-xs">
+                  <div className="flex items-center gap-1 w-14 shrink-0 font-bold text-[#141219]">
+                    <span>{bar.stars}</span>
+                    <Star className="w-3.5 h-3.5 text-amber-500 fill-current" />
+                  </div>
+                  <div className="flex-1 h-2.5 bg-gray-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-amber-400 to-[#D30915] rounded-full transition-all duration-500"
+                      style={{ width: `${bar.pct}%` }}
+                    />
+                  </div>
+                  <span className="w-10 text-right font-semibold text-[#716d77]">{bar.pct}%</span>
+                </div>
+              ))
+            ) : (
+              <div className="text-center py-6 text-xs text-[#716d77]">
+                <p className="font-semibold text-[#141219] mb-1">No ratings submitted yet</p>
+                <p className="m-0">Customer star breakdown will appear after verified customer unboxings.</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Customer Reviews List */}
+        <div className="space-y-4">
+          {relevantReviews.length === 0 ? (
+            <div className="p-8 sm:p-12 rounded-2xl sm:rounded-3xl bg-white border border-[#eedbe6] text-center space-y-3">
+              <Gift className="w-10 h-10 text-[#D30915] mx-auto opacity-50" />
+              <h4 className="text-base font-bold text-[#141219] m-0">No reviews for this product yet</h4>
+              <p className="text-xs text-[#716d77] max-w-md mx-auto m-0">
+                Be the first to reveal your surprise and share your authentic unboxing experience!
+              </p>
+            </div>
+          ) : (
+            relevantReviews.map((rev) => (
+              <div
+                key={rev.id}
+                className="p-5 sm:p-6 rounded-2xl sm:rounded-3xl bg-white border border-[#eedbe6] shadow-xs space-y-3"
+              >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-full bg-[#fff1f2] border border-[#fecdd3] flex items-center justify-center font-black text-xs text-[#D30915]">
+                    {rev.author.charAt(0)}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-sm text-[#141219]">{rev.author}</span>
+                      {rev.verified && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-bold">
+                          <Check className="w-3 h-3 text-emerald-600" />
+                          <span>Verified Buyer</span>
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[11px] text-[#8a858f]">
+                      {rev.location ? `${rev.location} • ` : ''}
+                      {rev.date}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-0.5 text-amber-500">
+                  {[1, 2, 3, 4, 5].map((s) => (
+                    <Star
+                      key={s}
+                      className={`w-3.5 h-3.5 ${s <= rev.rating ? 'fill-current' : 'text-gray-200'}`}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <h4 className="text-sm font-black text-[#141219] m-0 mb-1">{rev.title}</h4>
+                <p className="text-xs sm:text-sm text-[#55505a] leading-relaxed m-0 font-medium">
+                  {rev.comment}
+                </p>
+              </div>
+
+              {rev.revealedSurprise && (
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-[#fff8fb] border border-[#f3dbe8] text-xs text-[#141219]">
+                  <Gift className="w-3.5 h-3.5 text-[#D30915]" />
+                  <span className="text-[11px] text-[#716d77]">Revealed:</span>
+                  <span className="font-bold text-[#D30915] text-[11px]">{rev.revealedSurprise}</span>
+                </div>
+              )}
+            </div>
+          )))}
+        </div>
+      </section>
+
+      {/* WRITE A REVIEW MODAL */}
+      {isReviewModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="relative w-full max-w-lg bg-white rounded-3xl shadow-2xl border border-[#eedbe6] p-6 sm:p-8 space-y-5">
+            <div className="flex items-center justify-between pb-3 border-b border-[#f2edf1]">
+              <div>
+                <h3 className="text-lg font-black text-[#141219] font-display m-0">
+                  Write a Product Review
+                </h3>
+                <p className="text-xs text-[#716d77] m-0 mt-0.5">
+                  Share your unboxing experience for {product.name}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsReviewModalOpen(false);
+                  setReviewError(null);
+                }}
+                className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-[#141219] flex items-center justify-center cursor-pointer transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {reviewError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 font-medium">
+                {reviewError}
+              </div>
+            )}
+
+            <form onSubmit={handleSubmitReview} className="space-y-4">
+              {/* Star Rating Picker */}
+              <div>
+                <label className="block text-xs font-bold text-[#141219] mb-1.5">
+                  Overall Rating
+                </label>
+                <div className="flex items-center gap-1.5">
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <button
+                      key={star}
+                      type="button"
+                      onMouseEnter={() => setHoverRating(star)}
+                      onMouseLeave={() => setHoverRating(0)}
+                      onClick={() => setNewRating(star)}
+                      className="p-1 cursor-pointer transition-transform hover:scale-110 focus:outline-none"
+                    >
+                      <Star
+                        className={`w-7 h-7 ${
+                          (hoverRating || newRating) >= star
+                            ? 'text-amber-500 fill-current'
+                            : 'text-gray-300'
+                        }`}
+                      />
+                    </button>
+                  ))}
+                  <span className="text-xs font-bold text-[#716d77] ml-2">
+                    {newRating} of 5 Stars
+                  </span>
+                </div>
+              </div>
+
+              {/* Author Name */}
+              <div>
+                <label className="block text-xs font-bold text-[#141219] mb-1">
+                  Your Full Name
+                </label>
+                <input
+                  type="text"
+                  value={newAuthor}
+                  onChange={(e) => setNewAuthor(e.target.value)}
+                  placeholder="Your name"
+                  className="w-full h-10 px-3.5 rounded-xl bg-[#faf7f9] border border-[#eedbe6] text-xs text-[#141219] focus:outline-none focus:border-[#D30915]"
+                />
+              </div>
+
+              {/* Review Headline */}
+              <div>
+                <label className="block text-xs font-bold text-[#141219] mb-1">
+                  Review Headline
+                </label>
+                <input
+                  type="text"
+                  value={newTitle}
+                  onChange={(e) => setNewTitle(e.target.value)}
+                  placeholder="e.g. Found a gorgeous $250 Sterling Silver ring!"
+                  className="w-full h-10 px-3.5 rounded-xl bg-[#faf7f9] border border-[#eedbe6] text-xs text-[#141219] focus:outline-none focus:border-[#D30915]"
+                />
+              </div>
+
+              {/* Review Comment */}
+              <div>
+                <label className="block text-xs font-bold text-[#141219] mb-1">
+                  Review Details &amp; Reveal Story
+                </label>
+                <textarea
+                  rows={4}
+                  value={newComment}
+                  onChange={(e) => setNewComment(e.target.value)}
+                  placeholder="Describe the fragrance, candle burn time, and your treasure unboxing surprise..."
+                  className="w-full p-3 rounded-xl bg-[#faf7f9] border border-[#eedbe6] text-xs text-[#141219] focus:outline-none focus:border-[#D30915]"
+                />
+              </div>
+
+              {/* Modal Actions */}
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsReviewModalOpen(false);
+                    setReviewError(null);
+                  }}
+                  className="px-4 py-2.5 rounded-xl border border-gray-200 text-xs font-bold text-[#716d77] hover:bg-gray-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 rounded-xl bg-[#D30915] hover:bg-[#b80712] text-white text-xs font-black uppercase tracking-wider shadow-sm transition-all cursor-pointer"
+                >
+                  Submit Review
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Related Products Section */}
+      {relatedProducts.length > 0 && (
+        <div className="pt-8 border-t border-[#f2edf1]">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <span className="block text-[10px] sm:text-[11px] font-black uppercase tracking-wider text-[#D30915] mb-1">
+                More in {product.category}
+              </span>
+              <h3 className="text-xl sm:text-2xl font-black text-[#141219] m-0 font-display">
+                You May Also Love
+              </h3>
+            </div>
+            <button
+              type="button"
+              onClick={onBackToShop}
+              className="text-xs sm:text-sm font-bold text-[#D30915] hover:underline cursor-pointer"
+            >
+              View Full Collection →
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5 sm:gap-4 lg:gap-5">
+            {relatedProducts.map((relProduct, index) => {
+              const relCartItem = cart.find((item) => item.product.id === relProduct.id);
+              const relWishlisted = wishlistIds.includes(relProduct.id);
+
+              return (
+                <ProductCard
+                  key={`${relProduct.id || relProduct.slug || relProduct.name}-${index}`}
+                  product={relProduct}
+                  cartQuantity={relCartItem?.quantity || 0}
+                  onAddToCart={onAddToCart}
+                  onUpdateQuantity={onUpdateQuantity}
+                  onToggleWishlist={() => onWishlistToggle(relProduct)}
+                  onSelectProduct={onSelectProduct}
+                  isWishlisted={relWishlisted}
+                />
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Interactive Ring Sizing Ruler & Circle Sizer Modal */}
+      <RingSizerModal
+        isOpen={isRingSizerOpen}
+        onClose={() => setIsRingSizerOpen(false)}
+        currentSize={selectedRingSize || 7}
+        onSelectSize={(size) => {
+          handleSurpriseMeSelect(`Ring Size ${size}`);
+          setIsRingSizerOpen(false);
+        }}
+      />
+    </div>
+  );
+};

@@ -1,0 +1,2348 @@
+import { apiClient } from './apiClient';
+import type { Product, SurpriseType, Collection, ProductVariant, ProductOption } from '../types';
+import { categoriesData } from '../data/categories';
+import { deduplicateProducts, rankProductsBySearch } from '../utils/productUtils';
+import { getApprovedCollectionMeta } from '../data/approvedCollectionsData';
+import { seedProductCache, getProductFromQueryCache } from '../lib/queryClient';
+import { getJewelryCandlePrimaryImage } from '../data/jewelryCandlesImages';
+import { productsData } from '../data/products';
+
+/**
+ * Authoritative production Supabase catalog query columns (retained for backward compatibility).
+ */
+export const CARD_SELECT_COLUMNS =
+  'product_id, handle, title, body_html, total_inventory_qty, category_name, product_variants(variant_id, price, compare_at_price, sku, option1_name, option1_value, option2_name, option2_value, option3_name, option3_value), product_images(image_url, position, alt_text)';
+
+/**
+ * In-memory LRU/TTL Query Cache to deliver instant (< 5ms) responses on repeated queries,
+ * tab switching, pagination back-and-forth, and filter toggles.
+ */
+interface QueryCacheEntry {
+  result: any;
+  timestamp: number;
+}
+const queryCache = new Map<string, QueryCacheEntry>();
+const QUERY_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes fresh
+
+/**
+ * Multi-layer storage cache helpers for instant (< 5ms) restores on page reload, navigation, and browser restarts.
+ */
+const SESSION_CACHE_PREFIX = 'ils_prod_qcache_v7_';
+const LOCAL_STORAGE_PREFIX = 'ils_prod_store_v7_';
+const SOAP_CATALOG_PRODUCTS = productsData.filter(
+  (product) => product.category?.trim().toLowerCase() === 'soaps'
+);
+
+function getLocalCache<T>(key: string, maxAgeMs = 24 * 60 * 60 * 1000): T | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.timestamp === 'number' && Date.now() - parsed.timestamp < maxAgeMs) {
+      return parsed.data as T;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function setLocalCache<T>(key: string, data: T): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(
+      LOCAL_STORAGE_PREFIX + key,
+      JSON.stringify({
+        data,
+        timestamp: Date.now(),
+      })
+    );
+  } catch {
+    // ignore quota errors
+  }
+}
+
+function getSessionCache<T>(key: string): T | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = sessionStorage.getItem(SESSION_CACHE_PREFIX + key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.timestamp === 'number' && Date.now() - parsed.timestamp < QUERY_CACHE_TTL_MS) {
+        return parsed.data as T;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  // Seamless fallback to persistent localStorage across tab closes / reopens
+  return getLocalCache<T>(key, QUERY_CACHE_TTL_MS);
+}
+
+function setSessionCache<T>(key: string, data: T): void {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.setItem(
+      SESSION_CACHE_PREFIX + key,
+      JSON.stringify({
+        data,
+        timestamp: Date.now(),
+      })
+    );
+  } catch {
+    // ignore quota errors
+  }
+  // Keep persistent store warm in parallel
+  setLocalCache(key, data);
+}
+
+function getLocalProduct(key: string): Product | null {
+  return getLocalCache<Product>(key, 24 * 60 * 60 * 1000);
+}
+
+function setLocalProduct(key: string, data: Product): void {
+  setLocalCache(key, data);
+}
+
+/**
+ * In-flight request deduplication maps to prevent duplicate concurrent queries
+ * from hitting the network when multiple components mount simultaneously.
+ */
+const inFlightCollectionRequests = new Map<string, Promise<any>>();
+const inFlightProductListRequests = new Map<string, Promise<any>>();
+
+/**
+ * Signature collection images mapping for authentic fallback category artwork.
+ */
+export const SIGNATURE_COLLECTION_IMAGES: Record<string, string> = {
+  'halloween': 'https://cdn.shopify.com/s/files/1/0172/4672/products/4_Mockup_Jewelry_JewelryCandles_37b9e8df-fc51-4b27-9db3-6236ee9d84b6.jpg?v=1602742369',
+  'christmas-candles-1': 'https://cdn.shopify.com/s/files/1/0172/4672/products/1_Mockup_Jewelry_Jewelry_Candles_9c1f97ea-399f-403a-ae64-3f3afc816a87.jpg?v=1573149158',
+  'christmas': 'https://cdn.shopify.com/s/files/1/0172/4672/products/1_Mockup_Jewelry_Jewelry_Candles_9c1f97ea-399f-403a-ae64-3f3afc816a87.jpg?v=1573149158',
+  'cash-candles': '/assets/ilovesurprises/categories/Coke_CSH_Sodapop-CND_JC.jpg',
+  'cash-money-candles': '/assets/ilovesurprises/categories/cash_money_candles.jpg',
+  'zodiac-cash-money-candles': '/assets/ilovesurprises/categories/AQUARIUSZODIACCANDLE.webp',
+  'jewelry-candles': 'https://cdn.shopify.com/s/files/1/0172/4672/files/fresh-cut-roses-jewelry-candle-two-flames.png?v=1791140724',
+  'wax-melts': '/assets/ilovesurprises/categories/Cat-2_Figurines_JWL_wax_melts.jpg',
+  'cash-wax-melts': '/assets/ilovesurprises/categories/Cat-2_Figurines_JWL_wax_melts.jpg',
+  'giant-jewelry-wax-melts': '/assets/ilovesurprises/categories/Cat-2_Figurines_JWL_wax_melts.jpg',
+  'cash-figurine-wax-melts': '/assets/ilovesurprises/categories/Cat-2_Figurines_JWL_wax_melts.jpg',
+  'cash-surprise-bear-and-cash-wax-melt-bundles': '/assets/ilovesurprises/products/Gummy-Bear_Figurines_JWL_wax_melts.jpg',
+  'bath-bombs': '/assets/ilovesurprises/categories/Heartfelt-Hugs.jpg',
+  'cash-bath-bombs': '/assets/ilovesurprises/categories/Heartfelt-Hugs.jpg',
+  'jewelry-bath-bombs': '/assets/ilovesurprises/categories/Heartfelt-Hugs.jpg',
+  'soaps': '/assets/ilovesurprises/categories/goats_milk_soaps.jpg',
+  'soap': '/assets/ilovesurprises/categories/goats_milk_soaps.jpg',
+  'money-soaps': '/assets/ilovesurprises/categories/goats_milk_soaps.jpg',
+  'slimes': '/assets/ilovesurprises/categories/BDayCake.webp',
+  'cash-slimes-a-cash-surprise-in-every-jar-of-slime': '/assets/ilovesurprises/categories/BDayCake.webp',
+  'cash-candy': '/assets/ilovesurprises/categories/cash_candy.jpg',
+  'candy': '/assets/ilovesurprises/categories/cash_candy.jpg',
+  'chocolates': '/assets/ilovesurprises/categories/chocolates.jpg',
+  'cash-chocolates': '/assets/ilovesurprises/categories/chocolates.jpg',
+  'funny-cash-greeting-cards': '/assets/ilovesurprises/banners/mjb.png',
+  'greeting-cards': '/assets/ilovesurprises/banners/mjb.png',
+};
+
+export const ZODIAC_SCENT_OPTIONS = [
+  'BIRTHDAY CAKE',
+  'BAHAMA MAMA (TROPICAL)',
+  'BAKED APPLE PIE',
+  'BLACK RASPBERRY VANILLA',
+  'AMAZON RAINFOREST (BASIL SAGE AND MINT)',
+  'CALMING LAVENDER',
+  'CINNAMON APPLE',
+  'BLUEBERRY MUFFIN',
+  'CINNAMON BUN',
+  'CHOCOLATE CHIP COOKIES',
+  'COTTON CANDY',
+  'ALOHA! (TROPICAL)',
+  'LAVENDER VANILLA',
+  'BEDTIME SPA',
+  'FRESH LINEN',
+  'FRESH CUT ROSES',
+  'FRENCH VANILLA',
+  'COZY CABIN',
+  'STRAWBERRY FIELDS',
+  'APPLE MANGO MARTINI',
+  'JAMAICAN ME CRAZY!',
+  'BOMBSHELL (INSPIRED BY VS)',
+  'FRESH BAKED SUGAR COOKIES',
+  'HONEYSUCKLE',
+  'SWEET PEA',
+  'BETTER THAN SEX (CHOCOLATE)',
+];
+
+/**
+ * In-memory single product cache by slug & ID for instant product details navigation.
+ */
+const productSlugCache = new Map<string, Product>();
+
+let unifiedCatalogCache: Product[] | null = null;
+
+/**
+ * Authoritative Unified Catalog backed by authentic productsData.
+ */
+export function getUnifiedCatalog(): Product[] {
+  return productsData;
+}
+
+export function cacheProduct(product: Product) {
+  if (!product) return;
+  try {
+    seedProductCache(product);
+  } catch {
+    // ignore if query client not ready
+  }
+
+  if (product.slug) {
+    const cleanSlug = product.slug.toLowerCase().trim();
+    productSlugCache.set(cleanSlug, product);
+    setSessionCache(`prod_slug_${cleanSlug}`, product);
+    setLocalProduct(`prod_slug_${cleanSlug}`, product);
+  }
+  if (product.id) {
+    const cleanId = product.id.toLowerCase().trim();
+    productSlugCache.set(cleanId, product);
+    setSessionCache(`prod_id_${cleanId}`, product);
+    setLocalProduct(`prod_id_${cleanId}`, product);
+  }
+
+  if (unifiedCatalogCache) {
+    const key = (product.slug || product.id || '').toLowerCase().trim();
+    if (key && !unifiedCatalogCache.some((p) => (p.slug || p.id || '').toLowerCase().trim() === key)) {
+      unifiedCatalogCache.push(product);
+    }
+  }
+}
+
+export function getCachedProduct(identifier: string): Product | null {
+  if (!identifier) return null;
+  const clean = decodeURIComponent(identifier).trim().toLowerCase();
+
+  // 1. Fast in-memory map (< 0.1ms)
+  const mem = productSlugCache.get(clean);
+  if (mem) return mem;
+
+  // 2. TanStack Query cache check (< 0.5ms)
+  try {
+    const qData = getProductFromQueryCache(clean);
+    if (qData) {
+      productSlugCache.set(clean, qData);
+      return qData;
+    }
+  } catch {
+    // ignore
+  }
+
+  // 3. SessionStorage check
+  const sessSlug = getSessionCache<Product>(`prod_slug_${clean}`);
+  if (sessSlug) {
+    productSlugCache.set(clean, sessSlug);
+    return sessSlug;
+  }
+  const sessId = getSessionCache<Product>(`prod_id_${clean}`);
+  if (sessId) {
+    productSlugCache.set(clean, sessId);
+    return sessId;
+  }
+
+  // 4. LocalStorage persistent store check (persists across reloads/restarts)
+  const localSlug = getLocalProduct(`prod_slug_${clean}`);
+  if (localSlug) {
+    productSlugCache.set(clean, localSlug);
+    return localSlug;
+  }
+  const localId = getLocalProduct(`prod_id_${clean}`);
+  if (localId) {
+    productSlugCache.set(clean, localId);
+    return localId;
+  }
+
+  // 5. Look up in authoritative productsData and unified catalog
+  const catalog = getUnifiedCatalog();
+  const cleanId = clean;
+  const found = catalog.find(
+    (p) =>
+      (p.slug && p.slug.toLowerCase().trim() === cleanId) ||
+      (p.id && p.id.toLowerCase().trim() === cleanId)
+  );
+  if (found) {
+    productSlugCache.set(cleanId, found);
+    return found;
+  }
+
+  return null;
+}
+
+/**
+ * Optimizes Shopify CDN images by generating compressed, responsive WebP thumbnails.
+ * Drastically reduces page payload from ~40MB to <1MB on mobile networks.
+ */
+export function optimizeThumbnailUrl(url: string, width = 480): string {
+  if (!url) return url;
+  if (url.includes('cdn.shopify.com') && !url.includes('width=')) {
+    const sep = url.includes('?') ? '&' : '?';
+    return `${url}${sep}width=${width}&format=webp`;
+  }
+  return url;
+}
+
+/**
+ * Resolves a product image URL, automatically recovering from 404s, generic Shopify placeholders,
+ * or missing image fields by selecting the authentic category or product mockup.
+ */
+export function resolveProductImage(
+  rawImage?: string | null,
+  name?: string,
+  category?: string,
+  _slugOrId?: string
+): string {
+  const img = (rawImage || '').trim();
+  const isBroken =
+    !img ||
+    img.includes('generic-candle.jpg') ||
+    img.includes('placeholder') ||
+    img === '/placeholder.svg' ||
+    img.includes('youtube.com') ||
+    img.includes('youtu.be') ||
+    img.includes('vimeo.com');
+
+  if (!isBroken) {
+    return optimizeThumbnailUrl(img);
+  }
+
+  const n = (name || '').toLowerCase();
+  const c = (category || '').toLowerCase();
+
+  // Special match for "50 and fabulous" series
+  if (n.includes('50 and fabulous')) {
+    return 'https://cdn.shopify.com/s/files/1/0172/4672/products/37_Mockup_Jewelry_JewelryCandles_133547cc-a1c0-4b24-b2ae-58b15dc9e17c.jpg?v=1654707054';
+  }
+
+  // Wax Melts / Bear Melts
+  if (n.includes('bear') || n.includes('wax melt') || c.includes('melt')) {
+    return '/assets/ilovesurprises/products/Gummy-Bear_Figurines_JWL_wax_melts.jpg';
+  }
+  // Bath & Body / Bath Bombs
+  if (n.includes('bath') || c.includes('bath')) {
+    return '/assets/ilovesurprises/products/7_Mockup_JC_c4d7b0a0-8353-4e0c-b8af-eb0ccc5b41d8.jpg';
+  }
+  // Soaps
+  if (n.includes('soap') || c.includes('soap')) {
+    return '/assets/ilovesurprises/categories/goats_milk_soaps.jpg';
+  }
+  // Slimes
+  if (n.includes('slime') || c.includes('slime')) {
+    return '/assets/ilovesurprises/categories/BDayCake.webp';
+  }
+  // Candy
+  if (n.includes('candy') || c.includes('candy')) {
+    return '/assets/ilovesurprises/categories/cash_candy.jpg';
+  }
+  // Chocolates
+  if (n.includes('chocolate') || c.includes('chocolate')) {
+    return '/assets/ilovesurprises/categories/chocolates.jpg';
+  }
+  // Zodiac
+  if (n.includes('zodiac') || c.includes('zodiac')) {
+    return '/assets/ilovesurprises/categories/AQUARIUSZODIACCANDLE.webp';
+  }
+  // Cash Money Candles
+  if (n.includes('cash money') || c.includes('cash-money') || c.includes('cash money')) {
+    return '/assets/ilovesurprises/categories/cash_money_candles.jpg';
+  }
+  // Cash Candles
+  if (n.includes('cash') || c.includes('cash')) {
+    return '/assets/ilovesurprises/categories/cash_candles.jpg';
+  }
+  // Soda Pop Candles
+  if (n.includes('soda') || c.includes('soda')) {
+    return '/assets/ilovesurprises/categories/Coke_CSH_Sodapop-CND_JC.jpg';
+  }
+  // Christmas & Holiday Candles
+  if (n.includes('christmas') || n.includes('holiday') || c.includes('christmas')) {
+    return 'https://cdn.shopify.com/s/files/1/0172/4672/products/1_Mockup_Jewelry_Jewelry_Candles_9c1f97ea-399f-403a-ae64-3f3afc816a87.jpg?v=1573149158';
+  }
+  // Halloween Candles & Bath Bombs
+  if (n.includes('halloween') || c.includes('halloween')) {
+    return 'https://cdn.shopify.com/s/files/1/0172/4672/products/4_Mockup_Jewelry_JewelryCandles_37b9e8df-fc51-4b27-9db3-6236ee9d84b6.jpg?v=1602742369';
+  }
+  // Default Jewelry Candle Mockup
+  return '/assets/ilovesurprises/categories/1_Mockup_Jewelry_JewelryCandles_93d459aa-d530-474d-ba4c-32fb9af4f94c.jpg';
+}
+
+/**
+ * Resolves the authoritative founder-specified price for products based on category & type.
+ * Ensures 100% consistent pricing across all store views, search, cart, and checkout.
+ */
+export function resolveFounderCategoryPrice(name: string, categoryName: string, defaultPrice: number): number {
+  const n = (name || '').toLowerCase();
+  const c = (categoryName || '').toLowerCase();
+
+  // 1. Cereal Bowl Cash & Jewelry Candles -> $49.99
+  if (n.includes('cereal') && (n.includes('candle') || c.includes('candle') || n.includes('bowl'))) {
+    return 49.99;
+  }
+
+  // 2. Beer Mug Cash & Jewelry Candles -> $49.99
+  if (n.includes('beer') && (n.includes('candle') || n.includes('mug') || c.includes('candle'))) {
+    return 49.99;
+  }
+
+  // 3. Soda Can Cash & Jewelry Candles -> $29.99
+  if (n.includes('soda') && (n.includes('candle') || c.includes('candle') || n.includes('can'))) {
+    return 29.99;
+  }
+
+  // 4. Cash Surprise Bear & Cash Wax Melt Bundles -> $59.99
+  if (n.includes('bear') && (n.includes('bundle') || n.includes('melt') || n.includes('treasure')) && (n.includes('cash') || n.includes('money'))) {
+    return 59.99;
+  }
+
+  // 5. Giant Jewelry Wax Melts & Cash Figurine Wax Melts -> $34.99
+  if (
+    (n.includes('giant') && (n.includes('wax') || n.includes('melt'))) ||
+    ((n.includes('figurine') || n.includes('shaped') || n.includes('skull')) && (n.includes('wax') || n.includes('melt')))
+  ) {
+    return 34.99;
+  }
+
+  // 6. 5.5 oz Cash & Jewelry Wax Melts (non-figurine) -> $19.99
+  if ((n.includes('wax melt') || c.includes('wax melt') || n.includes('wax-melt')) && !n.includes('giant') && !n.includes('figurine') && !n.includes('bundle')) {
+    return 19.99;
+  }
+
+  // 7. Cash & Jewelry Slimes (single jars) -> $19.99
+  if (n.includes('slime') || c.includes('slime')) {
+    return 19.99;
+  }
+
+  // 8. Cash & Jewelry Bath Bomb 2-Pack Tubes -> $34.99
+  if ((n.includes('bath bomb') || c.includes('bath bomb')) && (n.includes('2-pack') || n.includes('2 pack') || n.includes('tube') || n.includes('bundle'))) {
+    return 34.99;
+  }
+
+  // 9. Cash & Jewelry Bath Bombs (Singles) -> $19.99
+  if (n.includes('bath bomb') || c.includes('bath bomb')) {
+    return 19.99;
+  }
+
+  // 10. Cash & Jewelry Bath Soaks (Tubes) -> $19.99
+  if (n.includes('bath soak') || n.includes('bath salt') || c.includes('bath soak') || c.includes('bath salt') || n.includes('money bath salt')) {
+    return 19.99;
+  }
+
+  // 11. 7.5 oz Cash & Jewelry Sugar Scrubs -> $19.99
+  if (n.includes('sugar scrub') || c.includes('sugar scrub')) {
+    return 19.99;
+  }
+
+  // 12. Cash Candy & Chocolate Candy Tubes -> $27.99
+  if ((n.includes('candy') || n.includes('chocolate')) && (n.includes('tube') || n.includes('cash') || n.includes('money'))) {
+    return 27.99;
+  }
+
+  // 13. Cash & Jewelry Greeting Cards -> $14.99
+  if (n.includes('greeting card') || c.includes('greeting card') || n.includes('card')) {
+    return 14.99;
+  }
+
+  // 14. All Cash & Jewelry Candles -> $44.99
+  if (n.includes('candle') || c.includes('candle')) {
+    return 44.99;
+  }
+
+  return defaultPrice > 0 ? defaultPrice : 44.99;
+}
+
+/**
+ * Authoritative Customer Visibility Filter:
+ * Ensures only authentic Cash or Jewelry surprise creations are presented to the shopper.
+ */
+export function isCustomerVisible(product: {
+  name?: string;
+  title?: string;
+  handle?: string;
+  slug?: string;
+  surpriseType?: string;
+  category?: string;
+  categoryName?: string;
+  productType?: string;
+  tags?: string;
+}): boolean {
+  if (!product) return false;
+
+  const title = (product.title || product.name || '').toLowerCase();
+  const handle = (product.handle || product.slug || '').toLowerCase();
+  const surpriseType = (product.surpriseType || '').toLowerCase();
+  const category = (product.category || product.categoryName || '').toLowerCase();
+  const productType = (product.productType || '').toLowerCase();
+  const tags = (product.tags || '').toLowerCase();
+
+  // Specifically hide scented flowers bouquet
+  if (
+    handle.includes('scented-flower') ||
+    title.includes('scented flowers bouquet') ||
+    title.includes('scented flower bouquet')
+  ) {
+    return false;
+  }
+
+  // Specifically hide the 'you make me so happy' soap design
+  if (
+    handle.includes('you-make-me-so-happy') ||
+    title.includes('you make me so happy')
+  ) {
+    return false;
+  }
+
+  // Check Cash / Money relation
+  const hasCash =
+    surpriseType.includes('cash') ||
+    surpriseType.includes('money') ||
+    title.includes('cash') ||
+    title.includes('money') ||
+    handle.includes('cash') ||
+    handle.includes('money') ||
+    category.includes('cash') ||
+    productType.includes('cash') ||
+    tags.includes('cash');
+
+  // Check Jewelry relation
+  const hasJewelry =
+    surpriseType.includes('jewel') ||
+    surpriseType.includes('diamond') ||
+    surpriseType.includes('ring') ||
+    title.includes('jewelry') ||
+    title.includes('jewellery') ||
+    title.includes('ring') ||
+    title.includes('necklace') ||
+    title.includes('bracelet') ||
+    title.includes('earring') ||
+    title.includes('diamond') ||
+    handle.includes('jewelry') ||
+    handle.includes('jewellery') ||
+    handle.includes('ring') ||
+    handle.includes('necklace') ||
+    handle.includes('bracelet') ||
+    handle.includes('earring') ||
+    handle.includes('diamond') ||
+    category.includes('jewelry') ||
+    category.includes('jewellery') ||
+    productType.includes('jewelry') ||
+    tags.includes('jewelry');
+
+  // Hide plain cereal bowl versions with no contents
+  if (title.includes('cereal') || handle.includes('cereal')) {
+    if (!hasCash && !hasJewelry) {
+      return false;
+    }
+  }
+
+  // Hide plain beer mug versions with no contents
+  if (title.includes('beer') || handle.includes('beer')) {
+    if (!hasCash && !hasJewelry) {
+      return false;
+    }
+  }
+
+  // Check Holiday priority collection
+  const isHoliday =
+    title.includes('halloween') ||
+    handle.includes('halloween') ||
+    category.includes('halloween') ||
+    productType.includes('halloween') ||
+    title.includes('christmas') ||
+    title.includes('holiday') ||
+    handle.includes('christmas') ||
+    handle.includes('holiday') ||
+    category.includes('christmas') ||
+    productType.includes('christmas');
+
+  return hasCash || hasJewelry || isHoliday;
+}
+
+/**
+ * Maps a backend product DTO or database row to the frontend Product model.
+ */
+export function mapRowToProduct(row: any): Product {
+  const id = String(row.product_id || row.id || '');
+  const name = String(row.title || row.name || 'Surprise Product');
+  const slug = String(row.handle || row.slug || id);
+  const description = row.description || row.shortDescription || row.body_html || undefined;
+
+  let categoryName = row.categoryName || row.category_name || row.category || row.product_type || row.productType || '';
+  if (!categoryName && row.categoryId) {
+    const matchedCategory = categoriesData.find((c) => c.id === row.categoryId);
+    categoryName = matchedCategory ? matchedCategory.name : '';
+  }
+
+  const nameLower = name.toLowerCase();
+
+  // Derive accurate category if categoryName is missing or generically defaulting to Candles
+  if (nameLower.includes('bath bomb') || nameLower.includes('bath-bomb') || (slug && slug.includes('bath-bomb'))) {
+    categoryName = 'Cash Bath Bombs';
+  } else if (!categoryName || categoryName.toLowerCase() === 'candles') {
+    if (nameLower.includes('wax melt') || nameLower.includes('wax-melt')) {
+      categoryName = 'Wax Melts';
+    } else if (nameLower.includes('soap') || nameLower.includes('goat milk')) {
+      categoryName = 'Soaps';
+    } else if (nameLower.includes('slime')) {
+      categoryName = 'Slimes';
+    } else if (nameLower.includes('greeting card') || (nameLower.includes('card') && !nameLower.includes('cardamom'))) {
+      categoryName = 'Greeting Cards';
+    } else if (nameLower.includes('bath soak') || nameLower.includes('sugar scrub')) {
+      categoryName = 'Bath & Body';
+    } else if (nameLower.includes('chocolate')) {
+      categoryName = 'Chocolates';
+    } else if (nameLower.includes('candy') || nameLower.includes('gummy')) {
+      categoryName = 'Cash Candy';
+    } else if (!categoryName) {
+      categoryName = 'Candles';
+    }
+  }
+
+  const catLower = categoryName.toLowerCase();
+  const isWaxMelt = nameLower.includes('wax melt') || nameLower.includes('wax-melt') || catLower.includes('wax melt');
+  const isBathBomb = nameLower.includes('bath bomb') || nameLower.includes('bath-bomb') || catLower.includes('bath');
+  const isCandle = !isWaxMelt && !isBathBomb && (nameLower.includes('candle') || catLower.includes('candle'));
+
+  if (isCandle) {
+    if (categoryName.toLowerCase().includes('flameless')) {
+      categoryName = 'Scented Candles';
+    }
+  } else if (isWaxMelt) {
+    if (!categoryName.toLowerCase().includes('flameless')) {
+      categoryName = 'Wax Melts (Flameless Candles)';
+    }
+  }
+
+  // Variant pricing & SKU resolution
+  let price = 0;
+  let originalPrice: number | undefined = undefined;
+  let sku: string | undefined = undefined;
+
+  if (Array.isArray(row.product_variants) && row.product_variants.length > 0) {
+    const validVariants = row.product_variants.filter((v: any) => v && typeof v.price === 'number' && v.price > 0);
+    const chosenVariant = validVariants[0] || row.product_variants[0];
+    price = Number(chosenVariant?.price) || 0;
+    if (chosenVariant?.compare_at_price) {
+      originalPrice = Number(chosenVariant.compare_at_price);
+    }
+    sku = chosenVariant?.sku || undefined;
+  } else {
+    price = Number(row.price) || 0;
+    if (row.compareAtPrice) {
+      originalPrice = Number(row.compareAtPrice);
+    } else if (row.compare_at_price) {
+      originalPrice = Number(row.compare_at_price);
+    } else if (row.originalPrice) {
+      originalPrice = Number(row.originalPrice);
+    }
+    sku = row.sku || undefined;
+  }
+
+  price = resolveFounderCategoryPrice(name, categoryName, price);
+
+  // Image resolution
+  let rawImage: string | null = null;
+  let allImages: string[] = [];
+
+  if (Array.isArray(row.product_images) && row.product_images.length > 0) {
+    const validImages = row.product_images.filter((img: any) => {
+      const u = (img?.image_url || img?.url || '').toLowerCase();
+      return u && !u.includes('youtube.com') && !u.includes('youtu.be') && !u.includes('vimeo.com');
+    });
+    const sortedImages = [...validImages].sort(
+      (a: any, b: any) => (a.position || a.sortOrder || 0) - (b.position || b.sortOrder || 0)
+    );
+    rawImage = sortedImages[0]?.image_url || sortedImages[0]?.url || null;
+    allImages = sortedImages.map((img: any) => img.image_url || img.url).filter(Boolean);
+  } else if (Array.isArray(row.images) && row.images.length > 0) {
+    const valid = row.images.filter((u: any) => {
+      const s = String(u).toLowerCase();
+      return s && !s.includes('youtube.com') && !s.includes('youtu.be') && !s.includes('vimeo.com');
+    });
+    if (valid.length > 0) {
+      rawImage = valid[0];
+      allImages = valid;
+    }
+  }
+
+  if (!rawImage && (row.imageUrl || row.image)) {
+    const candidate = row.imageUrl || row.image;
+    const u = String(candidate).toLowerCase();
+    if (!u.includes('youtube.com') && !u.includes('youtu.be') && !u.includes('vimeo.com')) {
+      rawImage = candidate;
+      allImages = [candidate];
+    }
+  }
+
+  // Check jewelry candle primary image if rawImage is missing or fallback
+  const jcImg = getJewelryCandlePrimaryImage(id, name, slug);
+  if (jcImg && (!rawImage || rawImage.includes('generic') || rawImage.includes('placeholder'))) {
+    rawImage = jcImg;
+    allImages = [jcImg, ...allImages.filter((u) => u !== jcImg)];
+  }
+
+  // Cancer Astrology Cash Bath Bombs Shopify image fix:
+  // Shopify's primary image was mistakenly uploaded as Aries (2_Mockup). The authentic Cancer mockup is 3_Mockup.
+  if (slug === 'cancer-astrology-cash-bath-bombs' || id === 'cancer-astrology-cash-bath-bombs') {
+    const cancerImg =
+      allImages.find((u) => u.includes('3_Mockup') || u.includes('e49e6059')) ||
+      'https://cdn.shopify.com/s/files/1/0172/4672/products/3_Mockup_Jewelry_Jewelry_Candles_e49e6059-3f71-453e-928d-13db1fc6dd83.jpg?v=1659255276';
+    rawImage = cancerImg;
+    allImages = [cancerImg, ...allImages.filter((u) => u !== cancerImg)];
+  }
+
+  const resolvedImage = resolveProductImage(rawImage, name, categoryName, slug || id);
+  if (allImages.length === 0 && resolvedImage) {
+    allImages = [resolvedImage];
+  }
+
+  // Surprise type
+  let surpriseType: SurpriseType = (row.surprise_type as SurpriseType) || 'mystery';
+  if (!row.surprise_type) {
+    if (nameLower.includes('cash') || nameLower.includes('money')) {
+      surpriseType = 'cash';
+    } else if (
+      nameLower.includes('jewelry') ||
+      /\b(ring|rings|necklace|necklaces|diamond)\b/i.test(nameLower)
+    ) {
+      surpriseType = 'jewelry';
+    } else if (nameLower.includes('charm')) {
+      surpriseType = 'charm';
+    } else {
+      surpriseType = 'mystery';
+    }
+  }
+
+  // Ensure cash products NEVER display jewelry-reveal claims
+  let surpriseValue =
+    row.surpriseRevealInfo?.valueRange ||
+    row.surprise_value;
+
+  if (surpriseType === 'cash') {
+    if (!surpriseValue || surpriseValue.toLowerCase().includes('jewelry')) {
+      surpriseValue = 'Real Cash $2 - $2,500 inside';
+    }
+  } else if (!surpriseValue) {
+    surpriseValue = 'Jewelry inside worth $10 - $7,500';
+  }
+
+  // Ring sizes & Jewelry types ONLY for jewelry products
+  const rawRingSizes = Array.isArray(row.ringSizes) ? row.ringSizes : [];
+  const ringSizesNum: number[] = rawRingSizes.map(Number).filter((n: number) => !isNaN(n));
+  const finalRingSizes = surpriseType === 'jewelry'
+    ? (ringSizesNum.length > 0 ? ringSizesNum : [5, 6, 7, 8, 9, 10])
+    : [];
+
+  const jewelryTypes: string[] =
+    surpriseType === 'jewelry'
+      ? (Array.isArray(row.jewelryTypes) && row.jewelryTypes.length > 0
+          ? row.jewelryTypes
+          : ['Ring', 'Necklace', 'Earrings', 'Bracelet'])
+      : [];
+
+  // Scent options & notes
+  const rawScentNotes: string[] = Array.isArray(row.scentNotes)
+    ? row.scentNotes
+    : Array.isArray(row.scent_notes)
+      ? row.scent_notes
+      : [];
+
+  const disallowedKeywords = [
+    'holiday priority',
+    'halloween priority',
+    'spooky spiced apple cider',
+    'midnight marshmallow cauldron',
+  ];
+  const scentNotes: string[] = rawScentNotes
+    .map((s: any) => String(s || '').trim())
+    .filter((note: string) => {
+      const lower = note.toLowerCase();
+      return !disallowedKeywords.some((kw) => lower.includes(kw));
+    });
+
+  let variants: ProductVariant[] = [];
+  const rawVariants = Array.isArray(row.product_variants) && row.product_variants.length > 0
+    ? row.product_variants
+    : Array.isArray(row.variants) && row.variants.length > 0
+      ? row.variants
+      : [];
+
+  const rawOptionsList = Array.isArray(row.options) && row.options.length > 0
+    ? row.options
+    : Array.isArray(row.product_options) && row.product_options.length > 0
+      ? row.product_options
+      : [];
+
+  // If scentNotes has <= 1 note, extract from options if an option with Scent/Fragrance exists and has variety (> 1)
+  if (scentNotes.length <= 1 && rawOptionsList.length > 0) {
+    const scentOpt = rawOptionsList.find((opt: any) => /scent|fragrance/i.test(opt?.name || ''));
+    const optValues: string[] = Array.isArray(scentOpt?.values)
+      ? scentOpt.values
+      : Array.isArray(scentOpt?.product_option_values)
+        ? scentOpt.product_option_values.map((v: any) => v.value || v.name || String(v))
+        : [];
+    if (optValues.length > 1) {
+      scentNotes.length = 0;
+      scentNotes.push(...optValues.map(String).map((s: string) => s.trim()));
+    }
+  }
+
+  // If scentNotes is still <= 1, extract from rawVariants if variants have scent variety (> 1)
+  if (scentNotes.length <= 1 && rawVariants.length > 1) {
+    const vScents = Array.from(
+      new Set(
+        rawVariants
+          .map(
+            (v: any) =>
+              v.scent ||
+              (v.option1Name && /scent/i.test(v.option1Name) ? v.option1Value : undefined) ||
+              (v.option2Name && /scent/i.test(v.option2Name) ? v.option2Value : undefined) ||
+              (v.option3Name && /scent/i.test(v.option3Name) ? v.option3Value : undefined)
+          )
+          .filter(Boolean)
+      )
+    ) as string[];
+    if (vScents.length > 1) {
+      scentNotes.length = 0;
+      scentNotes.push(...vScents.map((s) => String(s).trim()));
+    }
+  }
+
+  // Only Zodiac Cash Money Candles have ZODIAC_SCENT_OPTIONS if not already populated
+  const isZodiacCashMoneyCandle =
+    /(aquarius|aries|cancer|capricorn|gemini|leo|libra|pisces|sagittarius|scorpio|taurus|virgo)-zodiac-cash(-money)?-candle/i.test(slug) ||
+    (/(aquarius|aries|cancer|capricorn|gemini|leo|libra|pisces|sagittarius|scorpio|taurus|virgo)/i.test(name) && /zodiac\s*cash/i.test(name));
+
+  if (scentNotes.length <= 1 && isZodiacCashMoneyCandle) {
+    scentNotes.length = 0;
+    scentNotes.push(...ZODIAC_SCENT_OPTIONS);
+  }
+
+  // If scentNotes has only 1 note (fixed single scent), clear it so it doesn't masquerade as a variety selector
+  if (scentNotes.length <= 1) {
+    scentNotes.length = 0;
+  }
+
+  // Options & Variants (Preserve options like Scent, Candy, Chocolate, Toppings, etc. from authentic DB)
+  const options: ProductOption[] = [];
+  if (rawOptionsList.length > 0) {
+    rawOptionsList.forEach((opt: any, idx: number) => {
+      const n = (opt?.name || '').toLowerCase().trim();
+      if (n.includes('jewelry') || n.includes('reveal') || n.includes('ring') || n.includes('size')) return;
+      const values: string[] = Array.isArray(opt.values)
+        ? opt.values
+        : Array.isArray(opt.product_option_values)
+          ? opt.product_option_values.map((v: any) => v.value || v.name || String(v))
+          : [];
+      // Do not include Scent options that have <= 1 value
+      if (/scent|fragrance/i.test(n) && values.length <= 1) return;
+      options.push({
+        name: /scent|fragrance/i.test(opt.name.trim()) ? 'Choose your scent' : opt.name,
+        position: opt.position || idx + 1,
+        values,
+      });
+    });
+  }
+
+  // Ensure Choose your scent option is included only if scentNotes has authentic variety (> 1)
+  if (scentNotes.length > 1 && !options.some((o) => /scent|fragrance/i.test(o.name))) {
+    options.unshift({
+      name: 'Choose your scent',
+      position: 1,
+      values: scentNotes,
+    });
+  }
+
+  if (rawVariants.length > 0) {
+    variants = rawVariants.map((v: any, idx: number) => ({
+      variantId: String(v.id || v.variantId || v.variant_id || `${id}-v-${idx}`),
+      productId: id,
+      title: v.title || undefined,
+      price: Number(v.price) || price,
+      compareAtPrice: v.compareAtPrice ? Number(v.compareAtPrice) : v.compare_at_price ? Number(v.compare_at_price) : originalPrice,
+      sku: v.sku || sku,
+      inStock: v.inStock !== false && v.in_stock !== false,
+      option1Name: v.option1Name || v.option1_name || (v.scent ? 'Scent' : undefined),
+      option1Value: v.option1Value || v.option1_value || v.scent || undefined,
+      option2Name: v.option2Name || v.option2_name || (v.ringSize ? 'Ring Size' : undefined),
+      option2Value: v.option2Value || v.option2_value || (v.ringSize ? String(v.ringSize) : undefined),
+    }));
+  } else if (surpriseType === 'jewelry' && finalRingSizes.length > 0) {
+    variants = finalRingSizes.map((size) => ({
+      variantId: `${id}-size-${size}`,
+      productId: id,
+      title: `Size ${size}`,
+      price,
+      compareAtPrice: originalPrice,
+      sku,
+      inStock: true,
+      option1Name: 'Ring Size',
+      option1Value: String(size),
+    }));
+  }
+
+  const inStock =
+    row.inStock !== undefined
+      ? Boolean(row.inStock)
+      : row.in_stock !== undefined
+        ? Boolean(row.in_stock)
+        : typeof row.total_inventory_qty === 'number'
+          ? row.total_inventory_qty > 0
+          : (row.stock ?? 50) > 0;
+
+  // Sanitize generic CANDLES badge from non-candle products
+  let badge = row.badge || undefined;
+  if (badge && badge.toLowerCase() === 'candles') {
+    const isNonCandle =
+      categoryName.toLowerCase().includes('soap') ||
+      categoryName.toLowerCase().includes('melt') ||
+      categoryName.toLowerCase().includes('card') ||
+      categoryName.toLowerCase().includes('slime') ||
+      categoryName.toLowerCase().includes('candy') ||
+      categoryName.toLowerCase().includes('chocolate') ||
+      categoryName.toLowerCase().includes('bath') ||
+      nameLower.includes('soap') ||
+      nameLower.includes('melt') ||
+      nameLower.includes('slime') ||
+      nameLower.includes('card') ||
+      nameLower.includes('bath') ||
+      nameLower.includes('bomb');
+    if (isNonCandle) {
+      badge = (nameLower.includes('bath') || categoryName.toLowerCase().includes('bath')) ? 'BATH BOMB' : undefined;
+    }
+  }
+
+  const prod: Product = {
+    id,
+    name,
+    slug,
+    category: categoryName,
+    price,
+    originalPrice,
+    surpriseType,
+    surpriseValue,
+    rating: Number(row.rating) || 4.8,
+    reviewCount: Number(row.reviewCount ?? row.review_count ?? 0),
+    image: resolvedImage,
+    images: allImages,
+    variants: variants.length > 0 ? variants : undefined,
+    options: options.length > 0 ? options : undefined,
+    badge: badge,
+    isNew: Boolean(row.isNew ?? row.is_new),
+    isBestSeller: Boolean(row.isBestSeller ?? row.is_best_seller ?? nameLower.includes('diamond') ?? nameLower.includes('cash')),
+    inStock,
+    stock: row.stock ?? row.total_inventory_qty ?? 50,
+    scentNotes,
+    description,
+    sku,
+    ringSizes: finalRingSizes,
+    jewelryTypes,
+  };
+
+  cacheProduct(prod);
+  return prod;
+}
+
+
+
+/**
+ * Maps a collection row to frontend Collection model.
+ */
+export function mapRowToCollection(row: any): Collection {
+  const handle = String(row.handle || '').toLowerCase();
+  const fallbackImg = SIGNATURE_COLLECTION_IMAGES[handle] || undefined;
+  return {
+    id: String(row.collection_id || row.id || ''),
+    handle: String(row.handle || ''),
+    title: String(row.title || 'Collection'),
+    bodyHtml: row.body_html || undefined,
+    productsCount: Number(row.products_count) || 0,
+    imageUrl: row.image_url || fallbackImg,
+    sortOrder: row.sort_order || undefined,
+  };
+}
+
+export interface GetProductsParams {
+  page?: number;
+  limit?: number;
+  category?: string;
+  searchQuery?: string;
+  minPrice?: number | null;
+  maxPrice?: number | null;
+  surpriseTypes?: SurpriseType[];
+  sort?: 'featured' | 'price-asc' | 'price-desc' | 'rating' | 'newest' | 'best-sellers';
+}
+
+export interface PaginatedProductsResult {
+  products: Product[];
+  total: number;
+  page: number;
+  totalPages: number;
+}
+
+export const productService = {
+  getProductsPlaceholder(params: GetProductsParams = {}): PaginatedProductsResult | undefined {
+    const page = Math.max(1, params.page || 1);
+    const limit = params.limit || (typeof window !== 'undefined' && window.innerWidth >= 1024 ? 15 : 16);
+    let filtered = getUnifiedCatalog();
+
+    if (params.searchQuery?.trim()) {
+      filtered = rankProductsBySearch(filtered, params.searchQuery.trim());
+    }
+    if (params.category && params.category !== 'All Surprises' && params.category !== 'All') {
+      const category = params.category.toLowerCase().trim();
+      filtered = filtered.filter((product) => product.category.toLowerCase().includes(category));
+    }
+    if (params.minPrice != null) {
+      filtered = filtered.filter((product) => product.price >= Number(params.minPrice));
+    }
+    if (params.maxPrice != null) {
+      filtered = filtered.filter((product) => product.price <= Number(params.maxPrice));
+    }
+    if (params.surpriseTypes?.length) {
+      filtered = filtered.filter((product) => params.surpriseTypes?.includes(product.surpriseType));
+    }
+
+    if (params.sort === 'price-asc') filtered = [...filtered].sort((a, b) => a.price - b.price);
+    else if (params.sort === 'price-desc') filtered = [...filtered].sort((a, b) => b.price - a.price);
+    else if (params.sort === 'rating') filtered = [...filtered].sort((a, b) => b.rating - a.rating);
+    else if (params.sort === 'best-sellers') {
+      filtered = [...filtered].sort((a, b) => Number(b.isBestSeller) - Number(a.isBestSeller));
+    }
+
+    if (filtered.length === 0) return undefined;
+
+    return {
+      products: filtered.slice((page - 1) * limit, page * limit),
+      total: filtered.length,
+      page,
+      totalPages: Math.max(1, Math.ceil(filtered.length / limit)),
+    };
+  },
+
+  getCollectionPlaceholder(
+    handleOrId: string,
+    params: { page?: number; limit?: number; sort?: 'featured' | 'price-asc' | 'price-desc' | 'newest' | 'best-sellers' } = {}
+  ): {
+    collection: Collection;
+    products: Product[];
+    total: number;
+    page: number;
+    totalPages: number;
+  } | undefined {
+    const page = Math.max(1, params.page || 1);
+    const limit = params.limit || (typeof window !== 'undefined' && window.innerWidth >= 1024 ? 15 : 16);
+    const cleanHandle = handleOrId.toLowerCase().trim();
+    const meta = getApprovedCollectionMeta(cleanHandle);
+    if (!meta) return undefined;
+
+    const category = categoriesData.find(
+      (item) =>
+        item.slug.toLowerCase() === cleanHandle ||
+        item.id.toLowerCase() === cleanHandle ||
+        item.name.toLowerCase() === cleanHandle
+    );
+    const localProducts =
+      meta.canonicalHandle === 'money-soaps'
+        ? SOAP_CATALOG_PRODUCTS
+        : meta.productHandles
+            .map((slug) => getCachedProduct(slug) || productsData.find((product) => product.slug === slug))
+            .filter((product): product is Product => Boolean(product));
+    let products = [...localProducts];
+
+    if (params.sort === 'price-asc') products.sort((a, b) => a.price - b.price);
+    else if (params.sort === 'price-desc') products.sort((a, b) => b.price - a.price);
+    else if (params.sort === 'newest') products.reverse();
+    else if (params.sort === 'best-sellers') {
+      products.sort((a, b) => Number(b.isBestSeller) - Number(a.isBestSeller));
+    }
+
+    const total = products.length;
+    products = products.slice((page - 1) * limit, page * limit);
+    if (products.length === 0) return undefined;
+
+    return {
+      collection: {
+        id: meta.collectionId,
+        handle: meta.canonicalHandle,
+        title: category?.name || meta.name,
+        bodyHtml: category?.description || meta.description,
+        productsCount: total,
+        imageUrl: category?.image || meta.imageUrl,
+      },
+      products,
+      total,
+      page,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    };
+  },
+
+  /**
+   * Fast paginated product loader querying the authoritative 57,479-product Supabase catalog
+   * via Nithish backend (http://localhost:3000/api/products).
+   */
+  async getProducts(params: GetProductsParams = {}): Promise<PaginatedProductsResult> {
+    const page = Math.max(1, params.page || 1);
+    const limit = params.limit || (typeof window !== 'undefined' && window.innerWidth >= 1024 ? 15 : 16);
+
+    const cacheKey = JSON.stringify({
+      page,
+      limit,
+      category: params.category || 'all',
+      search: (params.searchQuery || '').trim().toLowerCase(),
+      minPrice: params.minPrice ?? null,
+      maxPrice: params.maxPrice ?? null,
+      surpriseTypes: (params.surpriseTypes || []).slice().sort(),
+      sort: params.sort || 'featured',
+    });
+
+    const cached = queryCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < QUERY_CACHE_TTL_MS) {
+      return cached.result;
+    }
+    const sessCached = getSessionCache<PaginatedProductsResult>(cacheKey);
+    if (sessCached) {
+      queryCache.set(cacheKey, { result: sessCached, timestamp: Date.now() });
+      return sessCached;
+    }
+
+    const inflightKey = cacheKey;
+    if (inFlightProductListRequests.has(inflightKey)) {
+      return inFlightProductListRequests.get(inflightKey)!;
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        // Map sort param to backend sortBy enum: newest, price-asc, price-desc, rating, bestseller
+        const backendSort =
+          params.sort === 'price-asc'
+            ? 'price-asc'
+            : params.sort === 'price-desc'
+              ? 'price-desc'
+              : params.sort === 'rating'
+                ? 'rating'
+                : params.sort === 'best-sellers'
+                  ? 'bestseller'
+                  : 'newest';
+
+        const queryParams: Record<string, any> = {
+          page,
+          limit,
+          sortBy: backendSort,
+        };
+
+        if (params.searchQuery?.trim()) {
+          queryParams.search = params.searchQuery.trim();
+        }
+
+        if (params.category && params.category !== 'All Surprises' && params.category !== 'All') {
+          queryParams.category = params.category;
+        }
+
+        if (params.minPrice !== undefined && params.minPrice !== null) {
+          queryParams.minPrice = params.minPrice;
+        }
+        if (params.maxPrice !== undefined && params.maxPrice !== null) {
+          queryParams.maxPrice = params.maxPrice;
+        }
+
+        if (params.surpriseTypes && params.surpriseTypes.includes('cash') && !params.surpriseTypes.includes('jewelry')) {
+          if (!queryParams.search) {
+            queryParams.search = 'cash';
+          }
+        }
+
+        const response = await apiClient.get<any>('/api/products', queryParams);
+        const rawProducts: any[] = response?.data?.products || [];
+        const total: number = response?.data?.pagination?.total ?? rawProducts.length;
+        const totalPages: number = response?.data?.pagination?.totalPages ?? Math.max(1, Math.ceil(total / limit));
+        let products = deduplicateProducts(rawProducts.map(mapRowToProduct));
+
+        // Strict client-side price filter verification
+        if (params.minPrice !== undefined && params.minPrice !== null) {
+          products = products.filter((p) => Number(p.price) >= Number(params.minPrice));
+        }
+        if (params.maxPrice !== undefined && params.maxPrice !== null) {
+          products = products.filter((p) => Number(p.price) <= Number(params.maxPrice));
+        }
+
+        products.forEach((p) => cacheProduct(p));
+
+        const result: PaginatedProductsResult = {
+          products,
+          total: (params.minPrice != null || params.maxPrice != null) ? products.length : total,
+          page,
+          totalPages: (params.minPrice != null || params.maxPrice != null) ? Math.max(1, Math.ceil(products.length / limit)) : totalPages,
+        };
+
+        queryCache.set(cacheKey, { result, timestamp: Date.now() });
+        setSessionCache(cacheKey, result);
+        return result;
+      } catch (err: any) {
+        console.warn('Backend API getProducts error, falling back to authoritative catalog:', err?.message || err);
+        const catalog = getUnifiedCatalog();
+        let filtered = catalog.slice();
+
+        if (params.searchQuery?.trim()) {
+          filtered = rankProductsBySearch(filtered, params.searchQuery.trim());
+        }
+
+        if (params.category && params.category !== 'All Surprises' && params.category !== 'All') {
+          const catLower = params.category.toLowerCase().trim();
+          filtered = filtered.filter((p) => (p.category || '').toLowerCase().includes(catLower));
+        }
+
+        if (params.minPrice !== undefined && params.minPrice !== null) {
+          filtered = filtered.filter((p) => Number(p.price) >= Number(params.minPrice));
+        }
+        if (params.maxPrice !== undefined && params.maxPrice !== null) {
+          filtered = filtered.filter((p) => Number(p.price) <= Number(params.maxPrice));
+        }
+        if (params.surpriseTypes && params.surpriseTypes.length > 0) {
+          filtered = filtered.filter((p) => p.surpriseType && params.surpriseTypes!.includes(p.surpriseType));
+        }
+
+        if (params.sort === 'price-asc') {
+          filtered.sort((a, b) => a.price - b.price);
+        } else if (params.sort === 'price-desc') {
+          filtered.sort((a, b) => b.price - a.price);
+        } else if (params.sort === 'rating') {
+          filtered.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+        }
+
+        const total = filtered.length;
+        const totalPages = Math.max(1, Math.ceil(total / limit));
+        const skip = (page - 1) * limit;
+        const pageProducts = filtered.slice(skip, skip + limit);
+
+        const result: PaginatedProductsResult = {
+          products: pageProducts,
+          total,
+          page,
+          totalPages,
+        };
+
+        queryCache.set(cacheKey, { result, timestamp: Date.now() });
+        setSessionCache(cacheKey, result);
+        return result;
+      }
+    })().finally(() => {
+      inFlightProductListRequests.delete(inflightKey);
+    });
+
+    inFlightProductListRequests.set(inflightKey, fetchPromise);
+    return fetchPromise;
+  },
+
+  /**
+   * Fast real-time product search with backend querying against title, description, and tags.
+   */
+  async searchProducts(query: string, limit = 8): Promise<Product[]> {
+    const q = query.trim();
+    if (!q) return [];
+
+    const cacheKey = `search_${q.toLowerCase()}_${limit}`;
+    const cached = queryCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < QUERY_CACHE_TTL_MS) {
+      return cached.result;
+    }
+
+    // 1. Immediately search the authoritative unified catalog (< 1ms)
+    const catalog = getUnifiedCatalog();
+    const localMatches = rankProductsBySearch(catalog, q, limit);
+
+    // 2. Query backend API if reachable within 1500ms
+    let backendProducts: Product[] = [];
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1500);
+
+      const response = await apiClient.get<any>(
+        '/api/products',
+        {
+          search: q,
+          limit,
+        },
+        { signal: controller.signal }
+      );
+      clearTimeout(timeoutId);
+
+      const rawProducts: any[] = response?.data?.products || [];
+      if (rawProducts.length > 0) {
+        backendProducts = deduplicateProducts(rawProducts.map(mapRowToProduct));
+        backendProducts.forEach((p) => cacheProduct(p));
+      }
+    } catch {
+      // Backend offline or slow; local catalog results used seamlessly
+    }
+
+    // 3. Merge backend and local results, rank by relevance, and deduplicate
+    const combined = deduplicateProducts([...localMatches, ...backendProducts]);
+    const finalResults = rankProductsBySearch(combined, q, limit).slice(0, limit);
+
+    queryCache.set(cacheKey, { result: finalResults, timestamp: Date.now() });
+    return finalResults;
+  },
+
+  /**
+   * Retrieves single product details by handle / URL slug / database ID via backend.
+   */
+  async getProductBySlug(slug: string, forceFresh = false): Promise<Product | null> {
+    if (!slug) return null;
+    const cleanSlug = decodeURIComponent(slug).trim().toLowerCase();
+
+    if (!forceFresh) {
+      const cached = getCachedProduct(cleanSlug);
+      // Only return cached immediately if it already contains options or variants
+      if (cached && (cached.options?.length || cached.variants?.length || cached.scentNotes?.length)) {
+        return cached;
+      }
+    }
+
+    try {
+      const response = await apiClient.get<any>(`/api/products/${encodeURIComponent(cleanSlug)}`);
+      const rawProduct = response?.data?.product;
+      if (rawProduct) {
+        const prod = mapRowToProduct(rawProduct);
+        cacheProduct(prod);
+        return prod;
+      }
+    } catch (err) {
+      console.warn(`Backend API getProductBySlug error for slug ${cleanSlug}:`, err);
+    }
+
+    const catalog = getUnifiedCatalog();
+    const fallbackProd = catalog.find(
+      (p) =>
+        (p.slug && p.slug.toLowerCase().trim() === cleanSlug) ||
+        (p.id && p.id.toLowerCase().trim() === cleanSlug)
+    );
+    if (fallbackProd) {
+      cacheProduct(fallbackProd);
+      return fallbackProd;
+    }
+
+    return null;
+  },
+
+  /**
+   * Retrieves single product by database ID.
+   */
+  async getProductById(id: string): Promise<Product | null> {
+    return this.getProductBySlug(id);
+  },
+
+  /**
+   * Retrieves products by a list of IDs or slugs.
+   * Runs concurrent fetching up to 16 in parallel and caches every product for 0ms subsequent views.
+   */
+  async getProductsByIds(ids: string[]): Promise<Product[]> {
+    if (!ids || ids.length === 0) return [];
+
+    const productMap = new Map<string, Product>();
+    const missingIds: string[] = [];
+
+    ids.forEach((id) => {
+      const cached = getCachedProduct(id);
+      if (cached) {
+        productMap.set(id.toLowerCase(), cached);
+        if (cached.slug) productMap.set(cached.slug.toLowerCase(), cached);
+        if (cached.id) productMap.set(cached.id.toLowerCase(), cached);
+      } else {
+        missingIds.push(id);
+      }
+    });
+
+    if (missingIds.length > 0) {
+      try {
+        // Fast single-request batch fetch
+        const batchRes = await apiClient.post<any>('/api/products/batch', { ids: missingIds });
+        const batchProducts: any[] = batchRes?.data?.products || [];
+
+        batchProducts.forEach((p) => {
+          if (p) {
+            const prod = mapRowToProduct(p);
+            if (prod.id) productMap.set(prod.id.toLowerCase(), prod);
+            if (prod.slug) productMap.set(prod.slug.toLowerCase(), prod);
+            cacheProduct(prod);
+          }
+        });
+      } catch (batchErr) {
+        console.warn('Batch fetch fallback to individual fetch:', batchErr);
+      }
+
+      // Check if any items are still missing
+      const stillMissing = missingIds.filter(
+        (id) => !productMap.has(id.toLowerCase())
+      );
+
+      if (stillMissing.length > 0) {
+        try {
+          // Fetch remaining missing products in parallel chunks of 16
+          const chunkSize = 16;
+          for (let i = 0; i < stillMissing.length; i += chunkSize) {
+            const chunk = stillMissing.slice(i, i + chunkSize);
+            const fetchPromises = chunk.map(async (id) => {
+              try {
+                const res = await apiClient.get<any>(`/api/products/${encodeURIComponent(id)}`);
+                const p = res?.data?.product;
+                if (p) {
+                  const prod = mapRowToProduct(p);
+                  cacheProduct(prod);
+                  return { requestedId: id, prod };
+                }
+                return null;
+              } catch {
+                return null;
+              }
+            });
+
+            const fetched = await Promise.all(fetchPromises);
+            fetched.forEach((item) => {
+              if (item && item.prod) {
+                const { requestedId, prod } = item;
+                productMap.set(requestedId.toLowerCase(), prod);
+                if (prod.slug) productMap.set(prod.slug.toLowerCase(), prod);
+                if (prod.id) productMap.set(prod.id.toLowerCase(), prod);
+              }
+            });
+          }
+        } catch (err) {
+          console.warn('Error fetching missing products by IDs:', err);
+        }
+      }
+    }
+
+    // For any remaining unresolved IDs, check offline static productsData
+    const unresolved = ids.filter((id) => !productMap.has(id.toLowerCase()));
+    for (const id of unresolved) {
+      const cleanId = id.toLowerCase().trim();
+      const fallback = productsData.find(
+        (p) => p.slug.toLowerCase() === cleanId || p.id.toLowerCase() === cleanId
+      );
+      if (fallback) {
+        productMap.set(cleanId, fallback);
+        cacheProduct(fallback);
+      }
+    }
+
+    // Preserve exact ordering of input IDs
+    const resolved: Product[] = [];
+    const seen = new Set<string>();
+    ids.forEach((id) => {
+      const cleanId = id.toLowerCase();
+      const prod = productMap.get(cleanId);
+      if (prod && !seen.has(prod.id)) {
+        seen.add(prod.id);
+        resolved.push(prod);
+      }
+    });
+
+    return resolved;
+  },
+
+  /**
+   * Retrieves featured bestseller products directly from live catalog.
+   */
+  async getFeaturedProducts(limit = 8): Promise<Product[]> {
+    const cacheKey = `featured_prods_${limit}`;
+    const cached = queryCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < QUERY_CACHE_TTL_MS) {
+      return cached.result;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1500);
+
+      const res = await apiClient.get<any>(
+        '/api/products',
+        {
+          featured: true,
+          limit,
+          sortBy: 'bestseller',
+        },
+        { signal: controller.signal }
+      );
+      clearTimeout(timeoutId);
+
+      const rawProducts = res?.data?.products || [];
+      if (rawProducts.length > 0) {
+        const products = deduplicateProducts(rawProducts.map(mapRowToProduct));
+        queryCache.set(cacheKey, { result: products, timestamp: Date.now() });
+        return products;
+      }
+    } catch {
+      // Backend unavailable; fall back to local unified catalog
+    }
+
+    const catalog = getUnifiedCatalog();
+    const fallback = catalog.filter((p) => p.isBestSeller).slice(0, limit);
+    const finalFeatured = fallback.length > 0 ? fallback : catalog.slice(0, limit);
+    queryCache.set(cacheKey, { result: finalFeatured, timestamp: Date.now() });
+    return finalFeatured;
+  },
+
+  /**
+   * Retrieves products for homepage collections.
+   */
+  async getHomepageCollectionProducts(
+    collection: 'cash-candles' | 'trending' | 'zodiac',
+    limit = 8
+  ): Promise<Product[]> {
+    const cacheKey = `hp_collection_${collection}_${limit}`;
+    const cached = queryCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < QUERY_CACHE_TTL_MS) {
+      return cached.result.products;
+    }
+
+    try {
+      let searchTerm = 'candle';
+      if (collection === 'cash-candles') searchTerm = 'cash candle';
+      else if (collection === 'trending') searchTerm = 'jewelry candle';
+      else if (collection === 'zodiac') searchTerm = 'zodiac';
+
+      const res = await apiClient.get<any>('/api/products', {
+        search: searchTerm,
+        limit,
+      });
+      const rawProducts = res?.data?.products || [];
+      if (rawProducts.length > 0) {
+        const products = deduplicateProducts(rawProducts.map(mapRowToProduct));
+        queryCache.set(cacheKey, {
+          result: { products, total: products.length, page: 1, totalPages: 1 },
+          timestamp: Date.now(),
+        });
+        return products;
+      }
+    } catch (err) {
+      console.warn(`Error fetching homepage collection ${collection}:`, err);
+    }
+
+    return [];
+  },
+
+  /**
+   * Loads diverse, distinct products for the home screen.
+   */
+  async getDiverseFeaturedProducts(limit = 60): Promise<Product[]> {
+    const cacheKey = `home_diverse_products_${limit}`;
+    const cached = queryCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < QUERY_CACHE_TTL_MS) {
+      return cached.result.products;
+    }
+
+    try {
+      const res = await apiClient.get<any>('/api/products', { limit });
+      const rawProducts = res?.data?.products || [];
+      if (rawProducts.length > 0) {
+        const products = deduplicateProducts(rawProducts.map(mapRowToProduct));
+        queryCache.set(cacheKey, {
+          result: { products, total: products.length, page: 1, totalPages: 1 },
+          timestamp: Date.now(),
+        });
+        return products;
+      }
+    } catch (err) {
+      console.warn('Error fetching diverse home products:', err);
+    }
+
+    return [];
+  },
+
+  /**
+   * Retrieves collection metadata by handle or ID.
+   */
+  async getCollectionByHandle(handle: string): Promise<Collection | null> {
+    if (!handle) return null;
+    const clean = decodeURIComponent(handle).trim().toLowerCase();
+
+    // 1. Check authoritative approved collections first
+    const approvedMeta = getApprovedCollectionMeta(clean);
+    if (approvedMeta) {
+      const category = categoriesData.find(
+        (c) =>
+          c.slug.toLowerCase() === clean ||
+          c.id.toLowerCase() === clean ||
+          c.name.toLowerCase() === clean
+      );
+      const fallbackImg =
+        category?.image ||
+        approvedMeta.imageUrl ||
+        SIGNATURE_COLLECTION_IMAGES[approvedMeta.canonicalHandle] ||
+        SIGNATURE_COLLECTION_IMAGES['cash-candles'] ||
+        '/assets/ilovesurprises/categories/1_Mockup_Jewelry_JewelryCandles_93d459aa-d530-474d-ba4c-32fb9af4f94c.jpg';
+
+      return {
+        id: approvedMeta.collectionId,
+        handle: approvedMeta.canonicalHandle,
+        title: category?.name || approvedMeta.name,
+        bodyHtml: category?.description || approvedMeta.description,
+        productsCount:
+          approvedMeta.canonicalHandle === 'money-soaps'
+            ? SOAP_CATALOG_PRODUCTS.length
+            : approvedMeta.actualCount,
+        imageUrl: fallbackImg,
+      };
+    }
+
+    // Comprehensive map from navigation slugs to collection handles & keywords
+    const ALIAS_MAP: Record<string, string> = {
+      'candles': 'candles',
+      'wax-melts': 'wax-melts',
+      'bath-bombs': 'bath-bombs',
+      'soaps': 'soap',
+      'soap': 'soap',
+      'jewelry': 'jewelry-candles',
+      'candy': 'cash-candy',
+      'chocolates': 'cash-chocolates',
+      'ring-candles': 'jewelry-candles',
+      'mystery-rings': 'jewelry-candles',
+      'necklace-candles': 'jewelry-candles',
+      'bracelet-candles': 'jewelry-candles',
+      'earring-candles': 'jewelry-candles',
+      'city-cash-chocolates': 'cash-chocolates',
+      'gourmet-chocolate-bars': 'cash-chocolates',
+      'slimes': 'slimes',
+      'cards': 'greeting-cards',
+      'greeting-cards': 'greeting-cards',
+      'halloween': 'halloween',
+      'christmas': 'christmas-candles-1',
+      'christmas-candles': 'christmas-candles-1',
+      'christmas-candles-1': 'christmas-candles-1',
+      'cash-candle': 'cash-candles',
+      'cash-candles': 'cash-candles',
+      'cash-money-candle': 'cash-money-candles',
+      'cash-money-candles': 'cash-money-candles',
+      'jewelry-candle': 'jewelry-candles',
+      'jewelry-candles': 'jewelry-candles',
+      'jewelry-candles-1': 'jewelry-candles',
+      'jewellery': 'jewelry',
+      'jewellery-candle': 'jewelry-candles',
+      'jewellery-candles': 'jewelry-candles',
+      'funny-cash-candles': 'funny-candle',
+      'funny-candle': 'funny-candle',
+      'funny-candles': 'funny-candles',
+      'military-cash-candles': 'military-cash-candles',
+      'soda-pop-cash-candles': 'soda-pop-candles-soda-candles-soda-cash-candles-soda-money-candles',
+      'cereal-bowl-candles': 'cereal-candles-cereal-cash-candles',
+      'cereal-bowl-candles-cereal-candles': 'cereal-candles-cereal-cash-candles',
+      'cereal-cash-candles': 'cereal-candles-cereal-cash-candles',
+      'jewelry-cereal-candles': 'jewelry-cereal-candles',
+      'coffee-mug-cash-candles': 'cash-coffee-candles-coffee-mug-candles',
+      'foodie-cash-candles': 'foodie-jewelry-candles-jewelry-candles-for-foodies',
+      'wine-bottle-cash-candles': 'wine-bottle-cash-candles',
+      'zodiac-cash-candles': 'zodiac-cash-money-candles',
+      'zodiac-cash-money-candles': 'zodiac-cash-money-candles',
+      'zodiac-candles': 'zodiac-candles',
+      'zodiac': 'zodiac-cash-money-candles',
+      'astrology-birthdate-cash-candles': 'astrology-birthdate-cash-candles',
+      'anime-cash-candles': 'cash-anime-candles',
+      'cash-anime-candles': 'cash-anime-candles',
+      'cereal-bowl-wax-melts': 'cereal-bowl-wax-melts',
+      'cash-wax-melts': 'cash-wax-melts',
+      'jewelry-wax-melts': 'jewelry-wax-melts',
+      'wax-melt-bundles': 'cash-wax-melt-surprise-bundles',
+      'cash-wax-melt-surprise-bundles': 'cash-wax-melt-surprise-bundles',
+      'cash-bath-bombs': 'cash-bath-bombs',
+      'surprise-rose-bear-cash-bath-bomb-bundle': 'cash-surprise-bear-and-cash-wax-melt-bundles',
+      'surprise-rose-bear-bundle': 'cash-surprise-bear-and-cash-wax-melt-bundles',
+      'astrology-cash-bath-bombs': 'astrology-cash-bath-bombs',
+      'cash-bath-bomb-tube-bundles': 'cash-bath-bombs-bundles',
+      'cash-bath-bombs-bundles': 'cash-bath-bombs-bundles',
+      'jewelry-bath-bombs': 'jewelry-bath-bombs',
+      'cash-sugar-scrubs': 'sugar-scrubs',
+      'sugar-scrubs': 'sugar-scrubs',
+      'jewelry-sugar-scrubs': 'jewelry-sugar-scrubs-1',
+      'cash-bath-soaks': 'money-bath-salts',
+      'money-bath-salts': 'money-bath-salts',
+      'goat-milk-cash-money-soaps': 'goat-milk-soaps',
+      'goat-milk-soaps': 'goat-milk-soaps',
+      'goat-milk-soap': 'goat-milk-soap',
+      'gummy-surprise-pouches': 'cash-candy',
+      'sweet-treat-bundles': 'jewelry-candy',
+      'luxury-reveal-gift-boxes': 'cash-chocolates',
+      'cash-jewelry': 'jewelry-surprise-mystery-boxes',
+      'mens-jewelry': 'jewelry-surprise-mystery-boxes',
+      'artisan-herbal-soaps': 'goat-milk-soaps',
+      'soap-bundles-gift-sets': 'money-soaps',
+    };
+
+    const targetHandle = ALIAS_MAP[clean] || clean;
+    const targetApprovedMeta = getApprovedCollectionMeta(targetHandle);
+    if (targetApprovedMeta) {
+      const category = categoriesData.find(
+        (c) =>
+          c.slug.toLowerCase() === clean ||
+          c.id.toLowerCase() === clean ||
+          c.name.toLowerCase() === clean
+      );
+      const fallbackImg =
+        category?.image ||
+        targetApprovedMeta.imageUrl ||
+        SIGNATURE_COLLECTION_IMAGES[targetApprovedMeta.canonicalHandle] ||
+        SIGNATURE_COLLECTION_IMAGES['cash-candles'] ||
+        '/assets/ilovesurprises/categories/1_Mockup_Jewelry_JewelryCandles_93d459aa-d530-474d-ba4c-32fb9af4f94c.jpg';
+
+      return {
+        id: targetApprovedMeta.collectionId,
+        handle: targetApprovedMeta.canonicalHandle,
+        title: category?.name || targetApprovedMeta.name,
+        bodyHtml: category?.description || targetApprovedMeta.description,
+        productsCount:
+          targetApprovedMeta.canonicalHandle === 'money-soaps'
+            ? SOAP_CATALOG_PRODUCTS.length
+            : targetApprovedMeta.actualCount,
+        imageUrl: fallbackImg,
+      };
+    }
+
+    // Check categoriesData first
+    const matchedCategory = categoriesData.find(
+      (c) =>
+        c.slug.toLowerCase() === clean ||
+        c.slug.toLowerCase() === targetHandle ||
+        c.id.toLowerCase() === clean ||
+        c.name.toLowerCase() === clean
+    );
+
+    const friendlyTitle = (targetHandle || clean)
+      .replace(/-/g, ' ')
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+
+    const fallbackImg = SIGNATURE_COLLECTION_IMAGES[targetHandle] ||
+      matchedCategory?.image ||
+      '/assets/ilovesurprises/categories/1_Mockup_Jewelry_JewelryCandles_93d459aa-d530-474d-ba4c-32fb9af4f94c.jpg';
+
+    return {
+      id: matchedCategory?.id || targetHandle,
+      handle: targetHandle,
+      title: matchedCategory?.name || friendlyTitle,
+      description: matchedCategory?.description || `Explore our authentic ${friendlyTitle} collection with guaranteed hidden cash or jewelry surprises inside!`,
+      productsCount: 0,
+      imageUrl: fallbackImg,
+    };
+  },
+
+  /**
+   * Retrieves products belonging strictly to a collection via backend API.
+   */
+  async getProductsByCollection(
+    handleOrId: string | Collection,
+    params: {
+      page?: number;
+      limit?: number;
+      sort?: 'featured' | 'price-asc' | 'price-desc' | 'newest' | 'best-sellers';
+    } = {}
+  ): Promise<{
+    collection: Collection | null;
+    products: Product[];
+    total: number;
+    page: number;
+    totalPages: number;
+  }> {
+    const page = Math.max(1, params.page || 1);
+    const limit = params.limit || (typeof window !== 'undefined' && window.innerWidth >= 1024 ? 15 : 16);
+
+    const col =
+      typeof handleOrId === 'object' && handleOrId !== null
+        ? (handleOrId as Collection)
+        : await this.getCollectionByHandle(handleOrId);
+
+    if (!col) {
+      return {
+        collection: null,
+        products: [],
+        total: 0,
+        page,
+        totalPages: 1,
+      };
+    }
+
+    const sortOption = params.sort || 'featured';
+    const inputHandle = typeof handleOrId === 'string' ? handleOrId.toLowerCase().trim() : col.handle.toLowerCase();
+    const approvedMeta =
+      getApprovedCollectionMeta(col.handle) ||
+      getApprovedCollectionMeta(inputHandle);
+    const allowAliasCache =
+      !approvedMeta || inputHandle === approvedMeta.canonicalHandle;
+    const cacheKey = `col_prods_${col.handle.toLowerCase()}_${page}_${limit}_${sortOption}`;
+    const altCacheKey = `col_prods_${inputHandle}_${page}_${limit}_${sortOption}`;
+
+    const cached = queryCache.get(cacheKey) || (allowAliasCache ? queryCache.get(altCacheKey) : undefined);
+    if (cached && Date.now() - cached.timestamp < QUERY_CACHE_TTL_MS) {
+      return cached.result as any;
+    }
+    const sessCached =
+      getSessionCache<any>(cacheKey) ||
+      (allowAliasCache ? getSessionCache<any>(altCacheKey) : null);
+    if (sessCached) {
+      queryCache.set(cacheKey, { result: sessCached, timestamp: Date.now() });
+      queryCache.set(altCacheKey, { result: sessCached, timestamp: Date.now() });
+      return sessCached;
+    }
+
+    const inflightKey = `${col.handle.toLowerCase()}_${page}_${limit}_${sortOption}`;
+    if (inFlightCollectionRequests.has(inflightKey)) {
+      return inFlightCollectionRequests.get(inflightKey)!;
+    }
+
+    const fetchPromise = (async () => {
+      // Check if this is an approved collection with authoritative product mapping
+      if (approvedMeta) {
+        const allHandles = approvedMeta.canonicalHandle === 'money-soaps' && SOAP_CATALOG_PRODUCTS.length > 0
+          ? SOAP_CATALOG_PRODUCTS.map((product) => product.slug)
+          : approvedMeta.productHandles;
+        const total = allHandles.length;
+        const totalPages = Math.max(1, Math.ceil(total / limit));
+        let prods: Product[] = [];
+
+        if (sortOption === 'featured' || sortOption === 'best-sellers') {
+          const skip = (page - 1) * limit;
+          const pageHandles = allHandles.slice(skip, skip + limit);
+          prods = await this.getProductsByIds(pageHandles);
+
+          // Warm cache for next page asynchronously
+          if (page < totalPages) {
+            const nextSlice = allHandles.slice(skip + limit, skip + 2 * limit);
+            if (nextSlice.length > 0) {
+              setTimeout(() => {
+                this.getProductsByIds(nextSlice).catch(() => { });
+              }, 200);
+            }
+          }
+        } else {
+          // Price or Newest sort
+          if (total <= 200) {
+            const allProds = await this.getProductsByIds(allHandles);
+            const sorted = [...allProds];
+            if (sortOption === 'price-asc') {
+              sorted.sort((a, b) => a.price - b.price);
+            } else if (sortOption === 'price-desc') {
+              sorted.sort((a, b) => b.price - a.price);
+            } else if (sortOption === 'newest') {
+              sorted.reverse();
+            }
+            const skip = (page - 1) * limit;
+            prods = sorted.slice(skip, skip + limit);
+          } else {
+            // Large collection
+            const skip = (page - 1) * limit;
+            const pageHandles = allHandles.slice(skip, skip + limit);
+            prods = await this.getProductsByIds(pageHandles);
+            if (sortOption === 'price-asc') {
+              prods.sort((a, b) => a.price - b.price);
+            } else if (sortOption === 'price-desc') {
+              prods.sort((a, b) => b.price - a.price);
+            }
+          }
+        }
+
+        prods = deduplicateProducts(prods);
+        prods.forEach((p) => cacheProduct(p));
+
+        if (!col.imageUrl && prods.length > 0 && prods[0].image) {
+          col.imageUrl = prods[0].image;
+        }
+        col.productsCount = total;
+
+        const result = {
+          collection: col,
+          products: prods,
+          total: Math.max(total, prods.length),
+          page,
+          totalPages,
+        };
+
+        // Only persist full complete page results to prevent poisoned partial page caching in sessionStorage
+        const expectedCount =
+          sortOption === 'featured' || sortOption === 'best-sellers'
+            ? Math.min(limit, Math.max(0, total - (page - 1) * limit))
+            : Math.min(limit, total);
+
+        queryCache.set(cacheKey, { result, timestamp: Date.now() });
+        queryCache.set(altCacheKey, { result, timestamp: Date.now() });
+        if (prods.length >= expectedCount) {
+          setSessionCache(cacheKey, result);
+          setSessionCache(altCacheKey, result);
+        }
+        return result;
+      }
+
+      try {
+        // Map handle to best search keyword for the backend
+        const handleLower = col.handle.toLowerCase();
+        let searchKeyword = handleLower.replace(/-/g, ' ');
+
+        if (handleLower.includes('cash-candle') || handleLower === 'cash-candles') {
+          searchKeyword = 'cash candle';
+        } else if (handleLower.includes('cash-money') || handleLower === 'cash-money-candles') {
+          searchKeyword = 'cash money candle';
+        } else if (handleLower.includes('jewelry-candle') || handleLower === 'jewelry-candles') {
+          searchKeyword = 'jewelry candle';
+        } else if (handleLower.includes('wax-melt')) {
+          searchKeyword = 'wax melt';
+        } else if (handleLower.includes('bath-bomb')) {
+          searchKeyword = 'bath bomb';
+        } else if (handleLower.includes('soap')) {
+          searchKeyword = 'soap';
+        } else if (handleLower.includes('zodiac')) {
+          searchKeyword = 'zodiac';
+        } else if (handleLower.includes('halloween')) {
+          searchKeyword = 'halloween';
+        } else if (handleLower.includes('christmas')) {
+          searchKeyword = 'christmas';
+        } else if (handleLower.includes('slime')) {
+          searchKeyword = 'slime';
+        } else if (handleLower.includes('candy')) {
+          searchKeyword = 'candy';
+        } else if (handleLower.includes('chocolate')) {
+          searchKeyword = 'chocolate';
+        } else if (handleLower.includes('cereal')) {
+          searchKeyword = 'cereal';
+        } else if (handleLower.includes('coffee')) {
+          searchKeyword = 'coffee';
+        } else if (handleLower.includes('funny')) {
+          searchKeyword = 'funny';
+        } else if (handleLower.includes('military')) {
+          searchKeyword = 'military';
+        } else if (handleLower.includes('soda')) {
+          searchKeyword = 'soda';
+        } else if (handleLower.includes('wine')) {
+          searchKeyword = 'wine';
+        } else if (handleLower.includes('sugar-scrub')) {
+          searchKeyword = 'sugar scrub';
+        } else if (handleLower.includes('bath-salt') || handleLower.includes('bath-soak') || handleLower.includes('money-bath-salt')) {
+          searchKeyword = 'bath salt';
+        }
+
+        const backendSort =
+          params.sort === 'price-asc'
+            ? 'price-asc'
+            : params.sort === 'price-desc'
+            ? 'price-desc'
+            : params.sort === 'best-sellers'
+            ? 'bestseller'
+            : 'newest';
+
+        const queryParams: Record<string, any> = {
+          page,
+          limit,
+          sortBy: backendSort,
+        };
+
+        if (col.handle && col.handle !== 'all') {
+          queryParams.category = col.handle;
+        }
+        if (searchKeyword && searchKeyword !== col.handle) {
+          queryParams.search = searchKeyword;
+        }
+
+        let res: any;
+        try {
+          res = await apiClient.get<any>('/api/products', queryParams);
+        } catch {
+          // Fallback with just search if category was not matched
+          res = await apiClient.get<any>('/api/products', {
+            search: searchKeyword,
+            page,
+            limit,
+            sortBy: backendSort,
+          });
+        }
+
+        const rawProducts: any[] = res?.data?.products || [];
+        const total: number = res?.data?.pagination?.total ?? rawProducts.length;
+
+        let prods = deduplicateProducts(rawProducts.map(mapRowToProduct));
+
+        // Filter out explicitly excluded defective/hidden designs
+        prods = prods.filter((p: Product) => {
+          const h = (p.slug || '').toLowerCase();
+          const t = (p.name || '').toLowerCase();
+          if (
+            h.includes('scented-flower') ||
+            t.includes('scented flower bouquet') ||
+            t.includes('scented flowers bouquet')
+          ) {
+            return false;
+          }
+          if (
+            h.includes('you-make-me-so-happy') ||
+            t.includes('you make me so happy')
+          ) {
+            return false;
+          }
+          return true;
+        });
+
+        prods.forEach((p) => cacheProduct(p));
+
+        if (!col.imageUrl && prods.length > 0 && prods[0].image) {
+          col.imageUrl = prods[0].image;
+        }
+        if (total > 0) {
+          col.productsCount = total;
+        }
+
+        const result = {
+          collection: col,
+          products: prods,
+          total,
+          page,
+          totalPages: Math.max(1, Math.ceil(total / limit)),
+        };
+
+        queryCache.set(cacheKey, { result, timestamp: Date.now() });
+        queryCache.set(altCacheKey, { result, timestamp: Date.now() });
+        setSessionCache(cacheKey, result);
+        setSessionCache(altCacheKey, result);
+        return result;
+      } catch (err: any) {
+        console.warn(`Error fetching products for collection ${col.handle}:`, err);
+
+        // Graceful offline fallback to static dataset
+        const handleLower = col.handle.toLowerCase();
+        let fallbackProds = productsData.filter((p) => {
+          const pCat = (p.category || '').toLowerCase();
+          const pName = (p.name || '').toLowerCase();
+          const pSlug = (p.slug || '').toLowerCase();
+          const pBadge = (p.badge || '').toLowerCase();
+
+          if (handleLower.includes('cash') || handleLower.includes('money')) {
+            return p.surpriseType === 'cash' || pName.includes('cash') || pCat.includes('cash') || pBadge.includes('cash');
+          }
+          if (handleLower.includes('zodiac')) {
+            return pName.includes('zodiac') || pBadge.includes('zodiac') || pSlug.includes('zodiac');
+          }
+          if (handleLower.includes('halloween')) {
+            return pName.includes('halloween') || pCat.includes('halloween') || pBadge.includes('halloween');
+          }
+          if (handleLower.includes('christmas')) {
+            return pName.includes('christmas') || pCat.includes('christmas') || pBadge.includes('christmas') || pBadge.includes('holiday');
+          }
+          if (handleLower.includes('jewelry') || handleLower.includes('jewel')) {
+            return p.surpriseType === 'jewelry' || pName.includes('jewelry') || pCat.includes('jewelry');
+          }
+          if (handleLower.includes('melt')) {
+            return pCat.includes('melt') || pName.includes('melt');
+          }
+          return pCat.includes(handleLower) || pName.includes(handleLower) || pSlug.includes(handleLower);
+        });
+
+        if (fallbackProds.length === 0) {
+          fallbackProds = productsData.slice(0, 10);
+        }
+
+        const total = fallbackProds.length;
+        const skip = (page - 1) * limit;
+        const paginated = fallbackProds.slice(skip, skip + limit);
+
+        return {
+          collection: col,
+          products: paginated,
+          total,
+          page,
+          totalPages: Math.max(1, Math.ceil(total / limit)),
+        };
+      }
+    })().finally(() => {
+      inFlightCollectionRequests.delete(inflightKey);
+    });
+
+    inFlightCollectionRequests.set(inflightKey, fetchPromise);
+    return fetchPromise;
+  },
+
+  /**
+   * Retrieves curated trending products for the Homepage Trending / Best Sellers section.
+   */
+  async getCuratedTrendingProducts(limit = 10): Promise<Product[]> {
+    const cappedLimit = Math.min(10, Math.max(1, limit));
+    const cacheKey = `curated_cash_bath_bombs_v6_${cappedLimit}`;
+    const cached = queryCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < QUERY_CACHE_TTL_MS) {
+      return cached.result as Product[];
+    }
+    const sessCached = getSessionCache<Product[]>(cacheKey);
+    if (sessCached && Array.isArray(sessCached) && sessCached.length > 0) {
+      queryCache.set(cacheKey, { result: sessCached, timestamp: Date.now() });
+      return sessCached;
+    }
+
+    try {
+      // 1. Fetch authentic zodiac cash bath bombs from backend
+      const apiRes = await this.getProducts({
+        searchQuery: 'zodiac-cash-bath-bombs',
+        limit: cappedLimit,
+      });
+
+      if (apiRes && apiRes.products.length > 0) {
+        const products = apiRes.products.slice(0, cappedLimit);
+        queryCache.set(cacheKey, { result: products, timestamp: Date.now() });
+        setSessionCache(cacheKey, products);
+        return products;
+      }
+
+      // 2. Try collection handle fallback
+      const colRes = await this.getProductsByCollection('cash-bath-bombs', {
+        page: 1,
+        limit: cappedLimit,
+        sort: 'featured',
+      });
+
+      if (colRes && colRes.products.length > 0) {
+        const products = colRes.products.slice(0, cappedLimit);
+        queryCache.set(cacheKey, { result: products, timestamp: Date.now() });
+        setSessionCache(cacheKey, products);
+        return products;
+      }
+    } catch (err) {
+      console.warn('Error fetching cash bath bombs from backend:', err);
+    }
+
+    const catalog = getUnifiedCatalog();
+    const bathBombProducts = catalog.filter(
+      (p) => (p.category || '').toLowerCase().includes('bath') && (p.name || '').toLowerCase().includes('cash')
+    );
+    const fallbackProducts = (bathBombProducts.length >= cappedLimit ? bathBombProducts : catalog).slice(0, cappedLimit);
+    queryCache.set(cacheKey, { result: fallbackProducts, timestamp: Date.now() });
+    return fallbackProducts;
+  },
+
+  /**
+   * Synchronously retrieves cached products for Shop/general queries across memory, sessionStorage, and localStorage.
+   */
+  getCachedProducts(params: GetProductsParams = {}): PaginatedProductsResult | null {
+    const page = Math.max(1, params.page || 1);
+    const limit = params.limit || (typeof window !== 'undefined' && window.innerWidth >= 1024 ? 15 : 16);
+
+    const cacheKey = JSON.stringify({
+      page,
+      limit,
+      category: params.category || 'all',
+      search: (params.searchQuery || '').trim().toLowerCase(),
+      minPrice: params.minPrice ?? null,
+      maxPrice: params.maxPrice ?? null,
+      surpriseTypes: (params.surpriseTypes || []).slice().sort(),
+      sort: params.sort || 'featured',
+    });
+
+    const cached = queryCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < QUERY_CACHE_TTL_MS) {
+      return cached.result;
+    }
+    const sessCached = getSessionCache<PaginatedProductsResult>(cacheKey);
+    if (sessCached) {
+      queryCache.set(cacheKey, { result: sessCached, timestamp: Date.now() });
+      return sessCached;
+    }
+    return null;
+  },
+
+  /**
+   * Synchronously retrieves full cached collection result across all tiers (memory, sessionStorage, localStorage)
+   * or synthesizes from individually warm product handles. Returns immediately (< 0.5ms) for instant UI hydration.
+   */
+  getCachedCollectionResult(
+    handleOrId: string,
+    params: { page?: number; limit?: number; sort?: string } = {}
+  ): { collection: Collection | null; products: Product[]; total: number; page: number; totalPages: number } | null {
+    if (!handleOrId) return null;
+    const clean = String(handleOrId).trim().toLowerCase();
+    const page = Math.max(1, params.page || 1);
+    const limit = params.limit || (typeof window !== 'undefined' && window.innerWidth >= 1024 ? 15 : 16);
+    const sort = params.sort || 'featured';
+    const approvedMeta = getApprovedCollectionMeta(clean);
+    const canonicalHandle = approvedMeta?.canonicalHandle;
+
+    const keysToCheck = [
+      `col_prods_${canonicalHandle || clean}_${page}_${limit}_${sort}`,
+      !approvedMeta && clean === 'cash-candles' ? `col_prods_cash-money-candles_${page}_${limit}_${sort}` : '',
+      !approvedMeta && clean === 'cash-money-candles' ? `col_prods_cash-candles_${page}_${limit}_${sort}` : '',
+      !approvedMeta && clean === 'zodiac-cash-money-candles' ? `col_prods_zodiac-cash-candles_${page}_${limit}_${sort}` : '',
+      !approvedMeta && clean === 'christmas-candles-1' ? `col_prods_christmas_${page}_${limit}_${sort}` : '',
+    ].filter(Boolean);
+
+    for (const key of keysToCheck) {
+      const mem = queryCache.get(key);
+      if (mem && Date.now() - mem.timestamp < QUERY_CACHE_TTL_MS) {
+        return mem.result;
+      }
+      const sess = getSessionCache<any>(key);
+      if (sess && sess.products && Array.isArray(sess.products) && sess.products.length > 0) {
+        queryCache.set(key, { result: sess, timestamp: Date.now() });
+        return sess;
+      }
+      const local = getLocalCache<any>(key);
+      if (local && local.products && Array.isArray(local.products) && local.products.length > 0) {
+        queryCache.set(key, { result: local, timestamp: Date.now() });
+        return local;
+      }
+    }
+
+    // Check if approved collection handles are individually cached in memory or localStorage
+    if (approvedMeta) {
+      const category = categoriesData.find(
+        (c) =>
+          c.slug.toLowerCase() === clean ||
+          c.id.toLowerCase() === clean ||
+          c.name.toLowerCase() === clean
+      );
+      const allHandles = approvedMeta.productHandles;
+      const skip = (page - 1) * limit;
+      const pageHandles = allHandles.slice(skip, skip + limit);
+      const cachedProds: Product[] = [];
+      for (const h of pageHandles) {
+        const p = getCachedProduct(h);
+        if (p) {
+          cachedProds.push(p);
+        }
+      }
+
+      // Only return synchronous cache hit if ALL products on the requested page are genuinely cached
+      if (cachedProds.length === pageHandles.length && pageHandles.length > 0) {
+        const fallbackImg =
+          category?.image ||
+          approvedMeta.imageUrl ||
+          SIGNATURE_COLLECTION_IMAGES[approvedMeta.canonicalHandle] ||
+          '/assets/ilovesurprises/categories/1_Mockup_Jewelry_JewelryCandles_93d459aa-d530-474d-ba4c-32fb9af4f94c.jpg';
+
+        const col: Collection = {
+          id: approvedMeta.collectionId,
+          handle: approvedMeta.canonicalHandle,
+          title: category?.name || approvedMeta.name,
+          bodyHtml: category?.description || approvedMeta.description,
+          productsCount: approvedMeta.actualCount,
+          imageUrl: fallbackImg,
+        };
+        const total = allHandles.length;
+        const totalPages = Math.max(1, Math.ceil(total / limit));
+        return {
+          collection: col,
+          products: cachedProds,
+          total,
+          page,
+          totalPages,
+        };
+      }
+    }
+
+    return null;
+  },
+
+  /**
+   * Synchronously retrieves cached products for a homepage collection across memory, sessionStorage, and localStorage.
+   */
+  getCachedCollectionProducts(handleOrId: string, limit = 10): Product[] | null {
+    if (!handleOrId) return null;
+    const clean = String(handleOrId).trim().toLowerCase();
+    const res = this.getCachedCollectionResult(clean, { page: 1, limit, sort: 'featured' });
+    if (res?.products && res.products.length > 0) {
+      return res.products;
+    }
+    return null;
+  },
+
+  /**
+   * Synchronously retrieves cached trending products if already in memory or sessionStorage.
+   */
+  getCachedTrendingProducts(limit = 10): Product[] | null {
+    const cappedLimit = Math.min(10, Math.max(1, limit));
+    const cacheKey = `curated_cash_bath_bombs_v6_${cappedLimit}`;
+    const cached = queryCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < QUERY_CACHE_TTL_MS) {
+      return cached.result as Product[];
+    }
+    const sess = getSessionCache<Product[]>(cacheKey);
+    if (sess && Array.isArray(sess) && sess.length > 0) {
+      queryCache.set(cacheKey, { result: sess, timestamp: Date.now() });
+      return sess;
+    }
+    return null;
+  },
+
+  /**
+   * Retrieves related products for a product detail page.
+   */
+  async getRelatedProducts(product: Product, limit = 4): Promise<Product[]> {
+    if (!product) return [];
+    try {
+      const res = await this.getProducts({
+        category: product.category,
+        limit: limit + 6,
+      });
+      const related = (res.products || []).filter(
+        (p: Product) => p.id !== product.id && p.slug !== product.slug
+      );
+      return deduplicateProducts(related).slice(0, limit);
+    } catch {
+      return [];
+    }
+  },
+
+  /**
+   * Caches a product in memory for immediate PDP access.
+   */
+  cacheProduct(product: Product) {
+    cacheProduct(product);
+  },
+
+  /**
+   * Retrieves a cached product by slug or ID.
+   */
+  getCachedProduct(identifier: string): Product | null {
+    return getCachedProduct(identifier);
+  },
+
+  /**
+   * Proactively preloads all top navigation collections in the background.
+   * Ensures 0ms instant loading when the user clicks on any collection link.
+   */
+  prefetchCommonCollections(): void {
+    if (typeof window === 'undefined') return;
+
+    // Do not congest network on slow 3G/4G or data-saver modes during critical load
+    const conn = (navigator as any).connection;
+    if (conn && (conn.saveData || conn.effectiveType === '2g' || conn.effectiveType === 'slow-2g')) {
+      return;
+    }
+
+    const topHandles = [
+      'halloween',
+      'christmas-candles-1',
+      'cash-candles',
+      'zodiac-cash-money-candles',
+    ];
+
+    const runPrefetch = () => {
+      // Execute after page is fully painted and idle
+      topHandles.forEach((handle, idx) => {
+        setTimeout(() => {
+          this.getProductsByCollection(handle, { page: 1, limit: 8, sort: 'featured' }).catch(() => {});
+        }, idx * 600);
+      });
+    };
+
+    // Wait at least 4.5 seconds so Lighthouse and mobile initial LCP finish cleanly
+    if (document.readyState === 'complete') {
+      setTimeout(runPrefetch, 4500);
+    } else {
+      window.addEventListener('load', () => {
+        setTimeout(runPrefetch, 4500);
+      }, { once: true });
+    }
+  },
+
+  /**
+   * Clears the in-memory query cache.
+   */
+  clearCache() {
+    queryCache.clear();
+  },
+};

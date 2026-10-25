@@ -1,0 +1,1343 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  adminService,
+  ADMIN_FEATURE_AVAILABILITY,
+  mapBackendProductToAdmin,
+  mapBackendUserToCustomer,
+  mapBackendLedgerEntry,
+  mergeStorefrontIntoHomepageContent,
+  purgeRetiredLocalAdminData,
+  type BackendProduct,
+} from './adminService';
+import { cmsService } from './cmsService';
+import { setStoredAuthToken } from './apiClient';
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function backendProduct(overrides: Partial<BackendProduct> = {}): BackendProduct {
+  return {
+    id: 'prod_1',
+    name: 'Zodiac Cash Candle',
+    slug: 'zodiac-cash-candle',
+    shortDescription: 'A candle',
+    description: 'Full description',
+    price: 39.99,
+    compareAtPrice: 59.99,
+    imageUrl: 'https://cdn.example.com/a.jpg',
+    images: ['https://cdn.example.com/a.jpg'],
+    categoryId: null,
+    categoryName: 'Cash Candles',
+    badge: null,
+    rating: 4.8,
+    reviewCount: 120,
+    stock: 42,
+    inStock: true,
+    lowStockThreshold: 5,
+    sku: 'ILS-ZC-1',
+    isBestSeller: true,
+    isNew: false,
+    status: 'ACTIVE',
+    ...overrides,
+  };
+}
+
+describe('adminService', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    localStorage.clear();
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    setStoredAuthToken('admin-tok');
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  describe('feature availability', () => {
+    it('marks endpoint-backed features as connected', () => {
+      expect(ADMIN_FEATURE_AVAILABILITY.products).toBe(true);
+      expect(ADMIN_FEATURE_AVAILABILITY.users).toBe(true);
+      expect(ADMIN_FEATURE_AVAILABILITY.analytics).toBe(true);
+      expect(ADMIN_FEATURE_AVAILABILITY.commissionLedger).toBe(true);
+      expect(ADMIN_FEATURE_AVAILABILITY.storefrontContent).toBe(true);
+      expect(ADMIN_FEATURE_AVAILABILITY.orders).toBe(true);
+      expect(ADMIN_FEATURE_AVAILABILITY.memberships).toBe(true);
+      expect(ADMIN_FEATURE_AVAILABILITY.appraisals).toBe(true);
+      expect(ADMIN_FEATURE_AVAILABILITY.storeSettings).toBe(true);
+      expect(ADMIN_FEATURE_AVAILABILITY.collectionsCrud).toBe(true);
+    });
+
+    it('marks features with no backend endpoint as unavailable', () => {
+      expect(ADMIN_FEATURE_AVAILABILITY.productVariants).toBe(false);
+      expect(ADMIN_FEATURE_AVAILABILITY.inventoryLog).toBe(false);
+    });
+  });
+
+  describe('single source of truth', () => {
+    it('returns nothing synchronously for server-owned collections', () => {
+      expect(adminService.getCommerceProducts()).toEqual([]);
+      expect(adminService.getCustomers()).toEqual([]);
+      expect(adminService.getRepresentatives()).toEqual([]);
+      expect(adminService.getCommissionLedger()).toEqual([]);
+      expect(adminService.getRecentActivity()).toEqual([]);
+    });
+
+    it('reports zeroed placeholder KPIs, not figures from storage', () => {
+      // A previous build computed revenue from localStorage orders.
+      localStorage.setItem(
+        'ilovesurprises_orders_v1',
+        JSON.stringify([{ id: 'x', total: 999 }])
+      );
+
+      const kpis = adminService.getKPIs();
+      expect(kpis.grossRevenue).toBe(0);
+      expect(kpis.totalOrders).toBe(0);
+      expect(adminService.getReportsData().grossSales).toBe(0);
+    });
+
+    it('purges retired local override keys', () => {
+      localStorage.setItem('ils_admin_products_override_v1', '[{"id":"stale"}]');
+      localStorage.setItem('ils_admin_commissions_v1', '[{"id":"stale"}]');
+
+      purgeRetiredLocalAdminData();
+      expect(localStorage.getItem('ils_admin_products_override_v1')).toBeNull();
+      expect(localStorage.getItem('ils_admin_commissions_v1')).toBeNull();
+    });
+  });
+
+  describe('product mapping', () => {
+    it('maps a backend product to the admin row', () => {
+      const item = mapBackendProductToAdmin(backendProduct());
+
+      expect(item.id).toBe('prod_1');
+      expect(item.price).toBe(39.99);
+      expect(item.originalPrice).toBe(59.99);
+      expect(item.stock).toBe(42);
+      expect(item.status).toBe('active');
+      expect(item.category).toBe('Cash Candles');
+      expect(item.isBestSeller).toBe(true);
+    });
+
+    it('maps DRAFT and ARCHIVED statuses', () => {
+      expect(mapBackendProductToAdmin(backendProduct({ status: 'DRAFT' })).status).toBe('draft');
+      expect(
+        mapBackendProductToAdmin(backendProduct({ status: 'ARCHIVED' })).status
+      ).toBe('archived');
+    });
+  });
+
+  describe('product CRUD', () => {
+    it('creates a product through the admin endpoint and returns the saved record', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({
+          status: 'success',
+          data: { product: backendProduct({ name: 'Saved Name' }) },
+        })
+      );
+
+      const created = await adminService.createProduct({
+        name: 'Typed Name',
+        price: 39.99,
+      });
+
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/products');
+      expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+      // The returned record reflects the server, not the submitted form.
+      expect(created.name).toBe('Saved Name');
+    });
+
+    it('throws on a rejected create instead of reporting success', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse(
+          {
+            status: 'error',
+            message: 'Validation failed',
+            errors: [{ field: 'body.price', message: 'Price must be positive' }],
+          },
+          400
+        )
+      );
+
+      await expect(
+        adminService.createProduct({ name: 'Thing', price: 10 })
+      ).rejects.toMatchObject({ kind: 'validation' });
+    });
+
+    it('rejects a create with an invalid price before calling the API', async () => {
+      await expect(
+        adminService.createProduct({ name: 'Thing', price: 0 })
+      ).rejects.toThrow(/greater than zero/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects a create with too short a name before calling the API', async () => {
+      await expect(
+        adminService.createProduct({ name: 'A', price: 10 })
+      ).rejects.toThrow(/at least 2 characters/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('throws on a 403 update rather than writing locally', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse(
+          { status: 'error', message: 'Forbidden: Insufficient permissions' },
+          403
+        )
+      );
+
+      await expect(
+        adminService.updateProduct('prod_1', { price: 49.99 })
+      ).rejects.toMatchObject({ kind: 'forbidden' });
+
+      expect(localStorage.getItem('ils_admin_products_override_v1')).toBeNull();
+    });
+
+    it('rejects a relative image path with an actionable message', async () => {
+      // The backend validates imageUrl with z.string().url().
+      await expect(
+        adminService.updateProduct('prod_1', { image: 'assets/local.png' })
+      ).rejects.toThrow(/absolute URLs/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('walks pagination when loading the catalogue', async () => {
+      fetchMock.mockImplementation((url: string) => {
+        const page = Number(new URL(url, 'http://x').searchParams.get('page'));
+        return jsonResponse({
+          status: 'success',
+          data: {
+            products: [backendProduct({ id: `p${page}` })],
+            pagination: { total: 2, page, limit: 100, totalPages: 2 },
+          },
+        });
+      });
+
+      const products = await adminService.fetchCommerceProducts();
+      expect(products.map((p) => p.id)).toEqual(['p1', 'p2']);
+    });
+  });
+
+  describe('users and roles', () => {
+    it('maps a backend user without inventing order history', () => {
+      const customer = mapBackendUserToCustomer({
+        id: 'usr_1',
+        email: 'person@example.com',
+        firstName: 'Alex',
+        lastName: 'Doe',
+        role: 'CUSTOMER',
+        isActive: true,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      });
+
+      expect(customer.name).toBe('Alex Doe');
+      expect(customer.status).toBe('active');
+      // No orders endpoint exists, so these are reported as unavailable.
+      expect(customer.ordersCount).toBe(0);
+      expect(customer.totalSpent).toBe(0);
+      expect(customer.lastOrderDate).toBe('');
+    });
+
+    it('changes a role through the real endpoint', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({
+          status: 'success',
+          data: {
+            user: {
+              id: 'usr_1',
+              email: 'person@example.com',
+              firstName: 'Alex',
+              lastName: 'Doe',
+              role: 'AFFILIATE',
+              isActive: true,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
+        })
+      );
+
+      const user = await adminService.updateUserRole('usr_1', 'AFFILIATE');
+
+      expect(String(fetchMock.mock.calls[0][0])).toContain(
+        '/api/admin/users/usr_1/role'
+      );
+      expect(fetchMock.mock.calls[0][1].method).toBe('PATCH');
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+        role: 'AFFILIATE',
+      });
+      expect(user.role).toBe('AFFILIATE');
+    });
+
+    it('does not write role overrides to localStorage', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({ status: 'error', message: 'Forbidden' }, 403)
+      );
+
+      await adminService.updateUserRole('usr_1', 'ADMIN').catch(() => {});
+      expect(localStorage.getItem('ils_admin_staff_override_v1')).toBeNull();
+    });
+  });
+
+  describe('commission ledger', () => {
+    it('reads the ledger from the admin endpoint', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({
+          status: 'success',
+          data: {
+            items: [
+              {
+                id: 'led_1',
+                representative: {
+                  id: 'aff_1',
+                  username: 'jamie',
+                  fullName: 'Jamie Lee',
+                  email: 'jamie@example.com',
+                  status: 'active',
+                },
+                orderAndCustomer: {
+                  orderId: 'ord_1',
+                  orderNumber: 'ILS-1001',
+                  customerName: 'Alex Doe',
+                  customerEmail: 'alex@example.com',
+                  orderDate: '2026-10-01T00:00:00.000Z',
+                },
+                tierLevel: { level: 1, name: 'Tier 1 Sponsor', ratePercent: 5 },
+                orderVolume: 100,
+                commissionEarned: {
+                  rate: 0.05,
+                  amountUsd: 5,
+                  formattedAmount: '$5.00',
+                },
+                status: 'PENDING',
+                availableAt: '2026-11-01T00:00:00.000Z',
+                ruleVersion: 'v1',
+                parentLedgerId: null,
+                note: null,
+                createdAt: '2026-10-01T00:00:00.000Z',
+              },
+            ],
+            pagination: { total: 1, page: 1, limit: 100, totalPages: 1 },
+          },
+        })
+      );
+
+      const records = await adminService.fetchCommissions();
+
+      expect(String(fetchMock.mock.calls[0][0])).toContain(
+        '/api/admin/commission/ledger'
+      );
+      expect(records).toHaveLength(1);
+      expect(records[0].commissionAmount).toBe(5);
+      expect(records[0].repName).toBe('Jamie Lee');
+      expect(records[0].status).toBe('pending');
+    });
+
+    it('maps the selling representative tier from level 0', () => {
+      const record = mapBackendLedgerEntry({
+        id: 'led_2',
+        representative: {
+          id: 'aff_1',
+          username: 'jamie',
+          fullName: 'Jamie Lee',
+          email: 'j@example.com',
+          status: 'active',
+        },
+        orderAndCustomer: {
+          orderId: 'o',
+          orderNumber: 'ILS-2',
+          customerName: 'C',
+          customerEmail: 'c@example.com',
+          orderDate: '2026-10-01T00:00:00.000Z',
+        },
+        tierLevel: { level: 0, name: 'Direct Sale', ratePercent: 20 },
+        orderVolume: 50,
+        commissionEarned: { rate: 0.2, amountUsd: 10, formattedAmount: '$10.00' },
+        status: 'PAID',
+        availableAt: '2026-10-01T00:00:00.000Z',
+        ruleVersion: 'v1',
+        parentLedgerId: null,
+        note: null,
+        createdAt: '2026-10-01T00:00:00.000Z',
+      });
+
+      expect(record.tier).toBe('selling_rep');
+      expect(record.status).toBe('paid');
+    });
+
+    it('updates a ledger status through the admin endpoint', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({
+          status: 'success',
+          data: { id: 'led_1', status: 'approved' },
+        })
+      );
+
+      await expect(
+        adminService.updateCommissionStatus('led_1', 'approved')
+      ).resolves.toBe(true);
+
+      expect(String(fetchMock.mock.calls[0][0])).toContain(
+        '/api/admin/commission/ledger/led_1/status'
+      );
+      expect(fetchMock.mock.calls[0][1]?.method).toBe('PATCH');
+      expect(fetchMock.mock.calls[0][1]?.body).toBe(
+        JSON.stringify({ status: 'approved' })
+      );
+      expect(localStorage.getItem('ils_admin_commissions_v1')).toBeNull();
+    });
+
+    it('batch approves pending ledger rows through the admin endpoint', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({
+          status: 'success',
+          data: { count: 3 },
+        })
+      );
+
+      await expect(adminService.batchApproveCommissions()).resolves.toBe(3);
+
+      expect(String(fetchMock.mock.calls[0][0])).toContain(
+        '/api/admin/commission/ledger/batch-approve'
+      );
+      expect(fetchMock.mock.calls[0][1]?.method).toBe('POST');
+    });
+  });
+
+  describe('orders', () => {
+    it('returns empty list synchronously if not loaded yet', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({
+          status: 'success',
+          data: { orders: [], pagination: { total: 0, page: 1, limit: 20 }, summary: { totalOrders: 0, totalRevenue: 0 } },
+        })
+      );
+      adminService._cachedOrders = [];
+      await expect(adminService.getCommerceOrders()).resolves.toEqual([]);
+    });
+
+    it('fetches orders list from GET /api/admin/orders matching AdminOrders view model', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({
+          status: 'success',
+          data: {
+            orders: [
+              {
+                id: 'ord_123',
+                orderNumber: 'ILS-TEST-12345',
+                customerName: 'Emma Watson',
+                customerEmail: 'emma@example.com',
+                total: 49.99,
+                paymentStatus: 'paid',
+                status: 'confirmed',
+                itemCount: 1,
+                itemsSummary: 'Mystery Diamond Candle',
+                createdAt: '2026-10-17T06:00:00.000Z',
+              },
+            ],
+            pagination: { total: 1, page: 1, limit: 20 },
+            summary: { totalOrders: 1, totalRevenue: 49.99 },
+          },
+        })
+      );
+
+      const registry = await adminService.fetchOrdersRegistry();
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/orders');
+      expect(registry.orders).toHaveLength(1);
+      expect(registry.orders[0].orderNumber).toBe('ILS-TEST-12345');
+      expect(registry.orders[0].customerName).toBe('Emma Watson');
+      expect(registry.orders[0].total).toBe(49.99);
+      expect(registry.orders[0].paymentStatus).toBe('paid');
+      expect(registry.orders[0].status).toBe('processing');
+      expect(registry.summary.totalRevenue).toBe(49.99);
+    });
+
+    it('filters orders by search, status, and paymentStatus', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({
+          status: 'success',
+          data: {
+            orders: [],
+            pagination: { total: 0, page: 1, limit: 20 },
+            summary: { totalOrders: 0, totalRevenue: 0 },
+          },
+        })
+      );
+
+      await adminService.fetchCommerceOrders({
+        search: 'ILS-TEST',
+        status: 'processing',
+        paymentStatus: 'paid',
+      });
+
+      const calledUrl = String(fetchMock.mock.calls[0][0]);
+      expect(calledUrl).toContain('search=ILS-TEST');
+      expect(calledUrl).toContain('status=processing');
+      expect(calledUrl).toContain('paymentStatus=paid');
+    });
+
+    it('retrieves complete order manifest from GET /api/admin/orders/:id', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({
+          status: 'success',
+          data: {
+            order: {
+              id: 'ord_123',
+              orderNumber: 'ILS-TEST-12345',
+              status: 'confirmed',
+              paymentStatus: 'paid',
+              subtotal: 49.99,
+              shippingFee: 0,
+              totalAmount: 49.99,
+              shippingAddressSnapshot: {
+                fullName: 'Emma Watson',
+                email: 'emma@example.com',
+                phone: '555-0199',
+                addressLine1: '123 Magic Way',
+                city: 'Beverly Hills',
+                state: 'CA',
+                zipCode: '90210',
+                country: 'US',
+              },
+              items: [
+                {
+                  id: 'it_1',
+                  productId: 'p_1',
+                  productName: 'Mystery Diamond Candle',
+                  sku: 'SKU-001',
+                  unitPrice: 49.99,
+                  quantity: 1,
+                  lineTotal: 49.99,
+                  selectedRingSize: '7',
+                  selectedScent: 'Lavender Breeze',
+                },
+              ],
+            },
+          },
+        })
+      );
+
+      const order = await adminService.fetchOrderById('ord_123');
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/orders/ord_123');
+      expect(order.orderNumber).toBe('ILS-TEST-12345');
+      expect(order.shippingAddressSnapshot?.city).toBe('Beverly Hills');
+      expect(order.items?.[0].selectedRingSize).toBe('7');
+    });
+
+    it('updates order status via PATCH /api/admin/orders/:id/status', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({
+          status: 'success',
+          data: {
+            order: {
+              id: 'ord_123',
+              orderNumber: 'ILS-TEST-12345',
+              status: 'processing',
+            },
+          },
+        })
+      );
+
+      const updated = await adminService.updateOrderStatus(
+        'ord_123',
+        'PROCESSING',
+        'Candle being hand-poured in workshop'
+      );
+
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/orders/ord_123/status');
+      expect(fetchMock.mock.calls[0][1].method).toBe('PATCH');
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+        status: 'PROCESSING',
+        notes: 'Candle being hand-poured in workshop',
+      });
+      expect(updated.status).toBe('processing');
+    });
+
+    it('records carrier tracking and marks order as SHIPPED via POST /api/admin/orders/:id/fulfillment', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({
+          status: 'success',
+          data: {
+            order: {
+              id: 'ord_123',
+              orderNumber: 'ILS-TEST-12345',
+              status: 'shipped',
+              carrier: 'USPS',
+              trackingNumber: '940011189922315582',
+              trackingUrl: 'https://tools.usps.com/go/TrackConfirmAction?tLabels=940011189922315582',
+              fulfillments: [
+                {
+                  id: 'ful_1',
+                  carrier: 'USPS',
+                  trackingNumber: '940011189922315582',
+                  status: 'SHIPPED',
+                },
+              ],
+            },
+          },
+        })
+      );
+
+      const fulfilled = await adminService.createOrderFulfillment('ord_123', {
+        carrier: 'USPS',
+        trackingNumber: '940011189922315582',
+        status: 'SHIPPED',
+        notes: 'Dispatched via Priority Tracked Mail',
+      });
+
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/orders/ord_123/fulfillment');
+      expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+      expect(fulfilled.status).toBe('shipped');
+      expect(fulfilled.carrier).toBe('USPS');
+      expect(fulfilled.trackingNumber).toBe('940011189922315582');
+      expect(fulfilled.trackingUrl).toContain('tools.usps.com');
+    });
+
+    it('adds internal admin note via POST /api/admin/orders/:id/notes', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse(
+          {
+            status: 'success',
+            data: {
+              note: {
+                id: 'not_1',
+                note: 'Customer called to confirm ring size is 7. Verified.',
+                authorRole: 'ADMIN',
+              },
+            },
+          },
+          201
+        )
+      );
+
+      const note = await adminService.addOrderNote('ord_123', {
+        note: 'Customer called to confirm ring size is 7. Verified.',
+        isCustomerVisible: false,
+      });
+
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/orders/ord_123/notes');
+      expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+      expect(note.note).toContain('ring size is 7');
+      expect(note.authorRole).toBe('ADMIN');
+    });
+
+    it('processes order refund via POST /api/admin/orders/:id/refund', async () => {
+      fetchMock.mockImplementation(() =>
+        jsonResponse({
+          status: 'success',
+          data: {
+            order: {
+              id: 'ord_123',
+              orderNumber: 'ILS-TEST-12345',
+              paymentStatus: 'refunded',
+            },
+            refund: {
+              amount: 49.99,
+              reason: 'Customer return requested',
+            },
+          },
+        })
+      );
+
+      const result = await adminService.processOrderRefund('ord_123', {
+        amount: 49.99,
+        reason: 'Customer return requested',
+        restockInventory: true,
+      });
+
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/orders/ord_123/refund');
+      expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+      expect(result.order.paymentStatus).toBe('refunded');
+      expect(result.refund.amount).toBe(49.99);
+      expect(result.refund.reason).toBe('Customer return requested');
+    });
+  });
+});
+
+describe('cmsService (storefront content)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    localStorage.clear();
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    setStoredAuthToken('admin-tok');
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const storefront = {
+    showcaseCards: [
+      {
+        id: 'showcase-halloween',
+        cardKey: 'halloween',
+        displayTitle: 'Halloween Spooktacular',
+        highlightBadge: 'Exclusive',
+        tagline: 'Spooky candles',
+        ctaButtonText: 'Shop Halloween',
+        targetCategoryKey: 'Halloween',
+        showcaseImageUri: 'https://cdn.example.com/h.png',
+        displayOnHomepage: true,
+        isActive: true,
+        sortOrder: 2,
+      },
+      {
+        id: 'showcase-xmas',
+        cardKey: 'christmas-x',
+        displayTitle: 'Christmas X',
+        highlightBadge: 'Holiday',
+        tagline: 'Festive',
+        ctaButtonText: 'Shop Christmas',
+        targetCategoryKey: 'Christmas',
+        showcaseImageUri: 'https://cdn.example.com/x.png',
+        displayOnHomepage: true,
+        isActive: true,
+        sortOrder: 1,
+      },
+    ],
+    banners: {
+      topStickyAnnouncementBar: {
+        isActive: true,
+        announcementCopy: 'Free shipping over $50',
+      },
+      promotionalDiscountAlertBar: {
+        isActive: true,
+        promoCopy: 'Save 15%',
+        promoCode: 'SURPRISE15',
+      },
+    },
+  };
+
+  it('returns the API configuration sorted by sortOrder', async () => {
+    fetchMock.mockImplementation(() =>
+      jsonResponse({ status: 'success', data: storefront })
+    );
+
+    const config = await cmsService.getStorefront();
+    expect(config.showcaseCards.map((c) => c.cardKey)).toEqual([
+      'christmas-x',
+      'halloween',
+    ]);
+  });
+
+  it('does not fall back to mock content when the API fails', async () => {
+    fetchMock.mockImplementation(() => {
+      throw new TypeError('Failed to fetch');
+    });
+
+    await expect(cmsService.getStorefront()).rejects.toMatchObject({
+      kind: 'network',
+    });
+  });
+
+  it('writes no storefront mirror to localStorage', async () => {
+    fetchMock.mockImplementation(() =>
+      jsonResponse({ status: 'success', data: storefront })
+    );
+
+    await cmsService.getStorefront();
+    expect(localStorage.getItem('ils_cms_storefront_v1')).toBeNull();
+  });
+
+  it('throws instead of reporting a successful banner save', async () => {
+    fetchMock.mockImplementation(() =>
+      jsonResponse(
+        { status: 'error', message: 'Forbidden: Insufficient permissions' },
+        403
+      )
+    );
+
+    await expect(
+      cmsService.updateBanners({
+        topStickyAnnouncementBar: { announcementCopy: 'New copy' },
+      })
+    ).rejects.toMatchObject({ kind: 'forbidden' });
+
+    expect(localStorage.getItem('ils_cms_storefront_v1')).toBeNull();
+  });
+
+  it('throws instead of reporting a successful showcase card save', async () => {
+    fetchMock.mockImplementation(() =>
+      jsonResponse({ status: 'error', message: 'Validation failed' }, 400)
+    );
+
+    await expect(
+      cmsService.updateShowcaseCard('halloween', { displayTitle: 'X' })
+    ).rejects.toBeTruthy();
+  });
+
+  it('rejects a data-URL showcase image the backend cannot store', async () => {
+    await expect(
+      cmsService.updateShowcaseCard('halloween', {
+        showcaseImageUri: 'data:image/png;base64,AAAA',
+      })
+    ).rejects.toThrow(/absolute URL/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('patches a showcase card through the admin endpoint on success', async () => {
+    fetchMock.mockImplementation(() =>
+      jsonResponse({
+        status: 'success',
+        data: { showcaseCard: storefront.showcaseCards[0] },
+      })
+    );
+
+    await cmsService.updateShowcaseCard('halloween', {
+      displayTitle: 'Updated Title',
+    });
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain(
+      '/api/admin/storefront/showcase/halloween'
+    );
+    expect(fetchMock.mock.calls[0][1].method).toBe('PATCH');
+  });
+
+  it('bulk updates the full storefront via PUT /api/admin/storefront', async () => {
+    fetchMock.mockImplementation(() =>
+      jsonResponse({
+        status: 'success',
+        data: storefront,
+      })
+    );
+
+    const result = await cmsService.updateFullStorefront({
+      announcementText: 'Live announcement',
+      hero: { headline: 'Live headline' },
+    });
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/storefront');
+    expect(fetchMock.mock.calls[0][1].method).toBe('PUT');
+    expect(result.showcaseCards.length).toBe(2);
+  });
+
+  it('resets all storefront settings to defaults via POST /api/admin/storefront/reset', async () => {
+    fetchMock.mockImplementation(() =>
+      jsonResponse({
+        status: 'success',
+        data: storefront,
+      })
+    );
+
+    await cmsService.resetStorefrontDefaults();
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/storefront/reset');
+    expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+  });
+
+  it('updates hero section copy and banners via PATCH /api/admin/storefront/hero', async () => {
+    fetchMock.mockImplementation(() =>
+      jsonResponse({
+        status: 'success',
+        data: { hero: { headline: 'New Hero Headline' } },
+      })
+    );
+
+    await cmsService.updateHero({ headline: 'New Hero Headline' });
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/storefront/hero');
+    expect(fetchMock.mock.calls[0][1].method).toBe('PATCH');
+  });
+
+  it('creates and deletes benefit tiles via REST endpoints', async () => {
+    fetchMock.mockImplementation(() =>
+      jsonResponse({
+        status: 'success',
+        data: { benefitTile: { id: 'tile-1', title: 'Tile 1' } },
+      })
+    );
+
+    await cmsService.createBenefitTile({ title: 'Tile 1', subtitle: 'Sub 1' });
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/storefront/hero/tiles');
+    expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+
+    fetchMock.mockImplementation(() =>
+      jsonResponse({
+        status: 'success',
+        data: { id: 'tile-1' },
+      })
+    );
+
+    await cmsService.deleteBenefitTile('tile-1');
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/api/admin/storefront/hero/tiles/tile-1');
+    expect(fetchMock.mock.calls[1][1].method).toBe('DELETE');
+  });
+
+  it('creates and deletes FAQs via REST endpoints', async () => {
+    fetchMock.mockImplementation(() =>
+      jsonResponse({
+        status: 'success',
+        data: { faqItem: { id: 'faq-1', question: 'Q?', answer: 'A!' } },
+      })
+    );
+
+    await cmsService.createFaq({ question: 'Q?', answer: 'A!' });
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/storefront/faqs');
+    expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+
+    fetchMock.mockImplementation(() =>
+      jsonResponse({
+        status: 'success',
+        data: { id: 'faq-1' },
+      })
+    );
+
+    await cmsService.deleteFaq('faq-1');
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/api/admin/storefront/faqs/faq-1');
+    expect(fetchMock.mock.calls[1][1].method).toBe('DELETE');
+  });
+
+  it('uploads an image to /api/admin/storefront/upload', async () => {
+    fetchMock.mockImplementation(() =>
+      jsonResponse({
+        status: 'success',
+        data: { url: '/uploads/img-123.jpg', absoluteUrl: 'http://localhost:3000/uploads/img-123.jpg' },
+      })
+    );
+
+    const res = await cmsService.uploadImage('data:image/png;base64,AAAA');
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/storefront/upload');
+    expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+    expect(res.url).toBe('/uploads/img-123.jpg');
+  });
+});
+
+describe('mergeStorefrontIntoHomepageContent', () => {
+  const local = {
+    announcementText: 'LOCAL ANNOUNCEMENT',
+    announcementActive: false,
+    promoBannerText: 'LOCAL PROMO',
+    promoBannerCode: 'LOCAL',
+    promoBannerActive: false,
+    featuredCards: [
+      {
+        id: 'halloween',
+        title: 'Local Halloween',
+        categoryKey: 'Halloween',
+        badge: 'Local',
+        tagline: 'Local tagline',
+        ctaText: 'Local CTA',
+        image: '/local.png',
+        itemCount: 83,
+        accentBorder: 'hover:border-orange-500',
+        active: true,
+      },
+    ],
+    hero: { headline: 'Local hero' },
+  } as never;
+
+  const storefront = {
+    showcaseCards: [
+      {
+        id: 'showcase-halloween',
+        cardKey: 'halloween',
+        displayTitle: 'Server Halloween',
+        highlightBadge: 'Server Badge',
+        tagline: 'Server tagline',
+        ctaButtonText: 'Server CTA',
+        targetCategoryKey: 'Halloween',
+        showcaseImageUri: 'https://cdn.example.com/server.png',
+        displayOnHomepage: true,
+        isActive: true,
+        sortOrder: 1,
+      },
+    ],
+    banners: {
+      topStickyAnnouncementBar: {
+        isActive: true,
+        announcementCopy: 'SERVER ANNOUNCEMENT',
+      },
+      promotionalDiscountAlertBar: {
+        isActive: true,
+        promoCopy: 'SERVER PROMO',
+        promoCode: 'SERVER15',
+      },
+    },
+  };
+
+  it('lets the database win for backend-owned content', () => {
+    const merged = mergeStorefrontIntoHomepageContent(local, storefront);
+
+    expect(merged.announcementText).toBe('SERVER ANNOUNCEMENT');
+    expect(merged.announcementActive).toBe(true);
+    expect(merged.promoBannerText).toBe('SERVER PROMO');
+    expect(merged.promoBannerCode).toBe('SERVER15');
+    expect(merged.featuredCards[0].title).toBe('Server Halloween');
+    expect(merged.featuredCards[0].image).toBe('https://cdn.example.com/server.png');
+  });
+
+  it('keeps presentation-only fields the backend does not model', () => {
+    const merged = mergeStorefrontIntoHomepageContent(local, storefront);
+    expect(merged.featuredCards[0].itemCount).toBe(83);
+    expect(merged.featuredCards[0].accentBorder).toBe('hover:border-orange-500');
+  });
+
+  it('keeps sections the backend cannot store', () => {
+    const merged = mergeStorefrontIntoHomepageContent(local, storefront);
+    expect(merged.hero).toEqual({ headline: 'Local hero' });
+  });
+
+  it('respects a card hidden from the homepage', () => {
+    const hidden = {
+      ...storefront,
+      showcaseCards: [
+        { ...storefront.showcaseCards[0], displayOnHomepage: false },
+      ],
+    };
+    expect(
+      mergeStorefrontIntoHomepageContent(local, hidden).featuredCards[0].active
+    ).toBe(false);
+  });
+});
+
+describe('adminService VIP memberships & jewelry appraisals', () => {
+  const fetchMock = vi.fn();
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock);
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function jsonResponse(data: any, status = 200): Response {
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      json: async () => data,
+      text: async () => JSON.stringify(data),
+    } as unknown as Response;
+  }
+
+  it('fetchMemberships retrieves subscriptions and pricing config from /api/admin/memberships', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        status: 'success',
+        data: {
+          memberships: [
+            {
+              id: 'mem-1',
+              representativeId: 'rep-1',
+              repName: 'Sarah Jenkins',
+              repUsername: 'sarahj',
+              repAvatar: '',
+              plan: 'monthly',
+              planName: 'Monthly Active Plan',
+              price: 19.99,
+              billingFrequency: 'monthly',
+              paymentStatus: 'paid',
+              status: 'active',
+              nextBillingDate: '2026-03-01',
+              renewalStatus: 'auto_renew',
+              cancellationStatus: 'none',
+              startedAt: '2026-01-01',
+              paymentMethodSnippet: 'Visa ending in •••• 4242',
+            },
+          ],
+          plans: [],
+          pricing: { monthlyPrice: 19.99, sixMonthDiscount: 10, twelveMonthDiscount: 15 },
+          stats: { totalSubscriptions: 1, activeSubscriptions: 1, totalMrr: 19.99, plansBreakdown: [] },
+          pagination: { total: 1, page: 1, limit: 50, totalPages: 1 },
+        },
+      })
+    );
+
+    const result = await adminService.fetchMemberships();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/memberships');
+    expect(result.memberships.length).toBe(1);
+    expect(result.memberships[0].repName).toBe('Sarah Jenkins');
+    expect(result.pricing.monthlyPrice).toBe(19.99);
+  });
+
+  it('fetchMembershipPricing & updateMembershipPricing read and write to /api/admin/memberships/pricing', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        status: 'success',
+        data: { monthlyPrice: 29.99, sixMonthDiscount: 15, twelveMonthDiscount: 20 },
+      })
+    );
+
+    const pricing = await adminService.fetchMembershipPricing();
+    expect(pricing.monthlyPrice).toBe(29.99);
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        status: 'success',
+        data: { monthlyPrice: 34.99, sixMonthDiscount: 20, twelveMonthDiscount: 25 },
+      })
+    );
+
+    const updated = await adminService.updateMembershipPricing({
+      monthlyPrice: 34.99,
+      sixMonthDiscount: 20,
+      twelveMonthDiscount: 25,
+    });
+    expect(updated.monthlyPrice).toBe(34.99);
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/api/admin/memberships/pricing');
+  });
+
+  it('updateMembershipStatus issues PATCH /api/admin/memberships/:id/status', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ status: 'success', data: { id: 'mem-1', status: 'suspended' } })
+    );
+
+    const success = await adminService.updateMembershipStatus('mem-1', 'suspended');
+    expect(success).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/memberships/mem-1/status');
+  });
+
+  it('fetchAppraisals & fetchAppraisalStats retrieve registered codes and overview statistics', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        status: 'success',
+        data: {
+          appraisals: [],
+          submissions: [],
+          stats: {
+            submissions: { totalSubmissions: 5, pendingReview: 2, reviewedSubmissions: 1, approvedAppraisals: 2 },
+            certificates: { registeredCodes: 15, totalAppraisedValuePool: 8500, averageItemValue: 566.67, customerPortalRoute: '/appraise-your-jewelry', valueRange: '$35 to $7,500' },
+          },
+        },
+      })
+    );
+
+    const res = await adminService.fetchAppraisals();
+    expect(res.stats.submissions.totalSubmissions).toBe(5);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/appraisals');
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        status: 'success',
+        data: {
+          submissions: { totalSubmissions: 5, pendingReview: 2, reviewedSubmissions: 1, approvedAppraisals: 2 },
+          certificates: { registeredCodes: 15, totalAppraisedValuePool: 8500, averageItemValue: 566.67, customerPortalRoute: '/appraise-your-jewelry', valueRange: '$35 to $7,500' },
+        },
+      })
+    );
+
+    const stats = await adminService.fetchAppraisalStats();
+    expect(stats.certificates.registeredCodes).toBe(15);
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/api/admin/appraisals/stats');
+  });
+
+  it('fetchSettings & saveSettings communicate with /api/admin/settings', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        status: 'success',
+        data: {
+          settings: {
+            referralAttributionWindowDays: 90,
+            restrictedRepUsernames: ['admin', 'ceo', 'support'],
+            paymentGateways: [{ id: 'stripe', name: 'Stripe', enabled: true }],
+            announcements: {
+              storeAnnouncementBarText: 'Test Announcement',
+              vipRevealClubPromoCopy: 'Test Promo',
+            },
+          },
+        },
+      })
+    );
+
+    const settings = await adminService.fetchSettings();
+    expect(settings.referralAttributionDays).toBe(90);
+    expect(settings.restrictedUsernames).toContain('ceo');
+    expect(settings.siteContent.announcementText).toBe('Test Announcement');
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/admin/settings');
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        status: 'success',
+        message: 'System settings saved successfully',
+        data: { settings: {} },
+      })
+    );
+
+    const saved = await adminService.saveSettings(settings);
+    expect(saved).toBe(true);
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/api/admin/settings');
+    expect(fetchMock.mock.calls[1][1].method).toBe('PUT');
+  });
+
+  describe('staff administration without 2FA', () => {
+    it('returns false for 2FA across all roles', () => {
+      const config = adminService.getRole2FAConfig();
+      expect(config.super_admin).toBe(false);
+      expect(config.store_manager).toBe(false);
+      expect(config.affiliate_manager).toBe(false);
+      expect(config.support_rep).toBe(false);
+
+      const roleDefs = adminService.getRoleDefinitions();
+      expect(roleDefs.affiliate_manager.requires2FA).toBe(false);
+      expect(roleDefs.super_admin.requires2FA).toBe(false);
+    });
+
+    it('manages staff members lifecycle: add, list, update role, and remove', async () => {
+      let isRemoved = false;
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method || 'GET';
+
+        if (url.includes('/api/admin/users') && url.includes('role=ADMIN')) {
+          return jsonResponse({
+            status: 'success',
+            data: {
+              users: [],
+              pagination: { total: 0, page: 1, limit: 100, totalPages: 1 },
+            },
+          });
+        }
+
+        if (url.includes('/api/admin/users') && url.includes('role=STAFF')) {
+          return jsonResponse({
+            status: 'success',
+            data: {
+              users: isRemoved
+                ? []
+                : [
+                {
+                  id: 'staff-alex',
+                  email: 'alex.ops@ilovesurprises-live.com',
+                  firstName: 'Alex',
+                  lastName: 'Operational Lead',
+                  role: 'STAFF',
+                  isActive: true,
+                  createdAt: '2026-10-21T00:00:00.000Z',
+                  updatedAt: '2026-10-21T00:00:00.000Z',
+                },
+              ],
+              pagination: { total: 1, page: 1, limit: 100, totalPages: 1 },
+            },
+          });
+        }
+
+        if (url.includes('/api/admin/staff') && method === 'POST') {
+          return jsonResponse({
+            status: 'success',
+            data: {
+              id: 'staff-alex',
+              email: 'alex.ops@ilovesurprises-live.com',
+              firstName: 'Alex',
+              lastName: 'Operational Lead',
+              role: 'STAFF',
+              isActive: true,
+              createdAt: '2026-10-21T00:00:00.000Z',
+              updatedAt: '2026-10-21T00:00:00.000Z',
+            },
+          });
+        }
+
+        if (url.includes('/api/admin/staff/staff-alex') && method === 'PATCH') {
+          return jsonResponse({
+            status: 'success',
+            data: {
+              id: 'staff-alex',
+              email: 'alex.ops@ilovesurprises-live.com',
+              firstName: 'Alex',
+              lastName: 'Operational Lead',
+              role: 'STAFF',
+              isActive: true,
+              createdAt: '2026-10-21T00:00:00.000Z',
+              updatedAt: '2026-10-21T00:00:00.000Z',
+            },
+          });
+        }
+
+        if (url.includes('/api/admin/staff/staff-alex') && method === 'DELETE') {
+          isRemoved = true;
+          return jsonResponse({
+            status: 'success',
+            data: { success: true, message: 'Staff user deactivated.' },
+          });
+        }
+
+        return jsonResponse({ status: 'success', data: {} });
+      });
+
+      const initialStaff = await adminService.getStaffAdmins();
+      expect(initialStaff.length).toBeGreaterThanOrEqual(1);
+      expect(initialStaff.find((s) => s.id === 'staff-primary-admin')?.twoFactorRequired).toBe(false);
+      expect(initialStaff.some((s) => s.id === 'staff-store-mgr')).toBe(false);
+      expect(initialStaff.some((s) => s.id === 'staff-affiliate-dir')).toBe(false);
+
+      // Add a staff member
+      const newStaff = await adminService.addStaffMember({
+        name: 'Alex Operational Lead',
+        email: 'alex.ops@ilovesurprises-live.com',
+        role: 'store_manager',
+      });
+
+      expect(newStaff.name).toBe('Alex Operational Lead');
+      expect(newStaff.email).toBe('alex.ops@ilovesurprises-live.com');
+      expect(newStaff.role).toBe('store_manager');
+      expect(newStaff.twoFactorRequired).toBe(false);
+
+      const staffAfterAdd = await adminService.getStaffAdmins();
+      expect(staffAfterAdd.some((s) => s.id === newStaff.id)).toBe(true);
+
+      // Update role
+      await adminService.updateStaffRole(newStaff.id, 'support_rep');
+      const staffAfterRole = await adminService.getStaffAdmins();
+      expect(staffAfterRole.find((s) => s.id === newStaff.id)?.role).toBe('support_rep');
+
+      // Remove the added staff member
+      const removed = await adminService.removeStaffMember(newStaff.id);
+      expect(removed).toBe(true);
+      const staffAfterRemove = await adminService.getStaffAdmins();
+      expect(staffAfterRemove.some((s) => s.id === newStaff.id)).toBe(false);
+
+      // Protected primary admin cannot be removed
+      await expect(adminService.removeStaffMember('staff-primary-admin')).rejects.toThrow();
+    });
+
+    it('does not seed legacy role staff by default', async () => {
+      fetchMock.mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+
+        if (url.includes('/api/admin/users')) {
+          return jsonResponse({
+            status: 'success',
+            data: {
+              users: [],
+              pagination: { total: 0, page: 1, limit: 100, totalPages: 1 },
+            },
+          });
+        }
+
+        return jsonResponse({ status: 'success', data: {} });
+      });
+
+      const initialStaff = await adminService.getStaffAdmins();
+      expect(initialStaff.some((s) => s.id === 'staff-primary-admin')).toBe(true);
+      expect(initialStaff.some((s) => s.id === 'staff-store-mgr')).toBe(false);
+      expect(initialStaff.some((s) => s.id === 'staff-affiliate-dir')).toBe(false);
+      expect(initialStaff.some((s) => s.email === 'manager@ilovesurprises-live.com')).toBe(false);
+      expect(initialStaff.some((s) => s.email === 'affiliates@ilovesurprises-live.com')).toBe(false);
+    });
+
+    it('confirms 2FA is never required for any user or role', () => {
+      expect(adminService.is2FARequiredForUser('ilovesurprises.admin@gmail.com')).toBe(false);
+      expect(adminService.is2FARequiredForUser('cookuwithcomali336@gmail.com')).toBe(false);
+      expect(adminService.is2FARequiredForUser('random@example.com', 'super_admin')).toBe(false);
+      expect(adminService.is2FARequiredForUser('support@ilovesurprises-live.com', 'support_rep')).toBe(false);
+    });
+  });
+});
+
+
