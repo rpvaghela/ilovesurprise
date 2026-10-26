@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { OrderStatus, PaymentStatus, FulfillmentStatus } from '@prisma/client';
+import { OrderStatus, PaymentStatus, PaymentMethod, FulfillmentStatus } from '@prisma/client';
 
 export const listOrdersSchema = z.object({
   query: z.object({
@@ -44,11 +44,26 @@ export const updateOrderStatusSchema = z.object({
           }).optional()
         )
         .optional(),
+      paymentMethod: z
+        .preprocess(
+          (val) => (typeof val === 'string' ? val.toUpperCase() : val),
+          z.nativeEnum(PaymentMethod, {
+            message: 'Invalid payment method. Must be STRIPE or COD',
+          }).optional()
+        )
+        .optional(),
       notes: z.string().trim().optional(),
     })
-    .refine((data) => data.status !== undefined || data.paymentStatus !== undefined || data.notes !== undefined, {
-      message: 'At least one field (status, paymentStatus, notes) must be provided for update',
-    }),
+    .refine(
+      (data) =>
+        data.status !== undefined ||
+        data.paymentStatus !== undefined ||
+        data.paymentMethod !== undefined ||
+        data.notes !== undefined,
+      {
+        message: 'At least one field (status, paymentStatus, paymentMethod, notes) must be provided for update',
+      }
+    ),
 });
 
 export const createFulfillmentSchema = z.object({

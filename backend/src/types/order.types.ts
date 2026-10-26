@@ -101,6 +101,7 @@ export interface ListOrdersQueryDTO {
 export interface UpdateOrderStatusDTO {
   status?: OrderStatus;
   paymentStatus?: PaymentStatus;
+  paymentMethod?: PaymentMethod;
   notes?: string;
 }
 

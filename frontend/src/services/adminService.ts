@@ -2365,11 +2365,16 @@ export const adminService = {
   async updateOrderPaymentStatus(
     id: string,
     paymentStatus: 'paid' | 'pending' | 'failed' | string,
-    notes?: string
+    notes?: string,
+    paymentMethod?: string
   ): Promise<AdminOrderItem> {
+    const body: Record<string, any> = { paymentStatus: paymentStatus.toUpperCase() };
+    if (notes) body.notes = notes;
+    if (paymentMethod) body.paymentMethod = paymentMethod.toUpperCase();
+
     const response = await apiClient.patch<ApiResponse<{ order: any } | any>>(
       `/api/admin/orders/${encodeURIComponent(id)}/status`,
-      { paymentStatus: paymentStatus.toUpperCase(), notes }
+      body
     );
     const payload = unwrap<{ order?: any } | any>(response, `/api/admin/orders/${id}/status`);
     const updated = mapBackendOrderToAdmin(payload.order || payload);

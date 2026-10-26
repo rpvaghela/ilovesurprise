@@ -364,6 +364,10 @@ export const updateOrderStatus = async (
       updateData.status = input.status;
     }
 
+    if (input.paymentMethod) {
+      updateData.paymentMethod = input.paymentMethod;
+    }
+
     if (input.paymentStatus) {
       updateData.paymentStatus = input.paymentStatus;
       if (input.paymentStatus === PaymentStatus.PAID && order.paymentStatus !== PaymentStatus.PAID) {
