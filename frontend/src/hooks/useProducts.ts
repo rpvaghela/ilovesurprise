@@ -127,13 +127,15 @@ export function useProductsByCollection(
     },
   });
 
+  const queryData = query.data as CollectionQueryResult | undefined;
+
   return {
-    collection: query.data?.collection ?? null,
-    products: query.data?.products ?? [],
-    total: query.data?.total ?? 0,
-    page: query.data?.page ?? params.page ?? 1,
-    totalPages: query.data?.totalPages ?? 1,
-    isLoading: query.isLoading,
+    collection: queryData?.collection ?? null,
+    products: queryData?.products ?? [],
+    total: queryData?.total ?? 0,
+    page: queryData?.page ?? params.page ?? 1,
+    totalPages: queryData?.totalPages ?? 1,
+    isLoading: query.isLoading && (!queryData?.products || queryData.products.length === 0),
     isFetching: query.isFetching,
     error: query.error as Error | null,
     refetch: query.refetch,

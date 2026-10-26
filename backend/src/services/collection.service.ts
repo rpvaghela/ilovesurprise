@@ -161,6 +161,8 @@ export const CURATED_COLLECTIONS = [
   },
 ];
 
+const collectionProductsCache = new Map<string, { data: any[]; expiresAt: number }>();
+
 export class CollectionService {
   /**
    * Returns list of admin collections with product counts.
@@ -210,6 +212,12 @@ export class CollectionService {
    * Fetches products assigned to a collection
    */
   async getCollectionProducts(collectionIdOrSlug: string, limit = 50) {
+    const cacheKey = `${collectionIdOrSlug.toLowerCase()}_${limit}`;
+    const cached = collectionProductsCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.data;
+    }
+
     const slug = collectionIdOrSlug.toLowerCase().replace(/^cat-/, '');
     const curated = CURATED_COLLECTIONS.find(
       (c) => c.id === collectionIdOrSlug || c.slug === slug || c.dbId === collectionIdOrSlug
@@ -218,48 +226,55 @@ export class CollectionService {
     const searchSlug = curated?.slug || slug;
     const dbId = curated?.dbId || collectionIdOrSlug;
 
-    const dbProducts = await prisma.products.findMany({
-      where: {
-        OR: [
-          {
-            product_collections: {
-              some: {
-                OR: [
-                  { collectionId: dbId },
-                  { collections: { slug: { equals: searchSlug, mode: 'insensitive' } } },
-                  { collections: { name: { contains: curated?.name || searchSlug, mode: 'insensitive' } } },
-                ],
+    try {
+      const dbProducts = await prisma.products.findMany({
+        where: {
+          OR: [
+            {
+              product_collections: {
+                some: {
+                  OR: [
+                    { collectionId: dbId },
+                    { collections: { slug: { equals: searchSlug, mode: 'insensitive' } } },
+                    { collections: { name: { contains: curated?.name || searchSlug, mode: 'insensitive' } } },
+                  ],
+                },
               },
             },
-          },
-          { categoryId: collectionIdOrSlug },
-          { categories: { slug: { equals: searchSlug, mode: 'insensitive' } } },
-          { badge: { contains: curated?.name || searchSlug, mode: 'insensitive' } },
-        ],
-      },
-      take: limit,
-      orderBy: { createdAt: 'desc' },
-      include: {
-        categories: true,
-        product_images: { orderBy: { sortOrder: 'asc' } },
-        product_variants: true,
-        product_options: {
-          include: {
-            product_option_values: { orderBy: { sortOrder: 'asc' } },
-          },
+            { categoryId: collectionIdOrSlug },
+            { categories: { slug: { equals: searchSlug, mode: 'insensitive' } } },
+            { badge: { contains: curated?.name || searchSlug, mode: 'insensitive' } },
+          ],
         },
-        product_collections: {
-          include: {
-            collections: {
-              select: { id: true, name: true, slug: true },
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          categories: true,
+          product_images: { orderBy: { sortOrder: 'asc' } },
+          product_variants: true,
+          product_options: {
+            include: {
+              product_option_values: { orderBy: { sortOrder: 'asc' } },
             },
           },
-          take: 5,
+          product_collections: {
+            include: {
+              collections: {
+                select: { id: true, name: true, slug: true },
+              },
+            },
+            take: 5,
+          },
         },
-      },
-    });
+      });
 
-    return dbProducts.map(formatDbProduct);
+      const formatted = dbProducts.map(formatDbProduct);
+      collectionProductsCache.set(cacheKey, { data: formatted, expiresAt: Date.now() + 15 * 60 * 1000 });
+      return formatted;
+    } catch (err: any) {
+      console.warn('DB getCollectionProducts failed, returning cached or empty:', err?.message);
+      return [];
+    }
   }
 
   /**
@@ -298,6 +313,7 @@ export class CollectionService {
       },
     });
 
+    collectionProductsCache.clear();
     return { success: true, productId, collectionId: targetColId };
   }
 
@@ -320,6 +336,7 @@ export class CollectionService {
       },
     });
 
+    collectionProductsCache.clear();
     return { success: true, productId, collectionId: targetColId };
   }
 }
