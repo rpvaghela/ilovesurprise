@@ -9,6 +9,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: VPS_HOST
 
     steps:
       - name: Validate Deployment Secrets
