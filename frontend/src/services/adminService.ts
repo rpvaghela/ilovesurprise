@@ -502,6 +502,7 @@ export function mapBackendOrderToAdmin(raw: any): AdminOrderItem {
     customerName,
     customerEmail,
     total,
+    paymentMethod: raw.paymentMethod || raw.payment_method || (raw.paymentSummary?.method) || undefined,
     status,
     paymentStatus,
     itemCount,
@@ -2331,16 +2332,44 @@ export const adminService = {
 
   /**
    * Status transitions via `PATCH /api/admin/orders/:id/status`.
-   * Accepts statuses such as PROCESSING, SHIPPED, DELIVERED, CANCELLED.
+   * Accepts statuses such as PROCESSING, SHIPPED, DELIVERED, CANCELLED, and optional paymentStatus.
    */
   async updateOrderStatus(
     id: string,
-    status: string,
+    status?: string,
+    notes?: string,
+    paymentStatus?: string
+  ): Promise<AdminOrderItem> {
+    const body: Record<string, any> = {};
+    if (status) body.status = status.toUpperCase();
+    if (paymentStatus) body.paymentStatus = paymentStatus.toUpperCase();
+    if (notes) body.notes = notes;
+
+    const response = await apiClient.patch<ApiResponse<{ order: any } | any>>(
+      `/api/admin/orders/${encodeURIComponent(id)}/status`,
+      body
+    );
+    const payload = unwrap<{ order?: any } | any>(response, `/api/admin/orders/${id}/status`);
+    const updated = mapBackendOrderToAdmin(payload.order || payload);
+
+    this._cachedOrders = this._cachedOrders.map((o) =>
+      o.id === id || o.orderNumber === id ? { ...o, ...updated } : o
+    );
+    return updated;
+  },
+
+  /**
+   * Cash on Delivery / Payment status transitions via `PATCH /api/admin/orders/:id/status`.
+   * Specifically used to mark Cash on Delivery orders as paid (successful) or failed.
+   */
+  async updateOrderPaymentStatus(
+    id: string,
+    paymentStatus: 'paid' | 'pending' | 'failed' | string,
     notes?: string
   ): Promise<AdminOrderItem> {
     const response = await apiClient.patch<ApiResponse<{ order: any } | any>>(
       `/api/admin/orders/${encodeURIComponent(id)}/status`,
-      { status: status.toUpperCase(), notes }
+      { paymentStatus: paymentStatus.toUpperCase(), notes }
     );
     const payload = unwrap<{ order?: any } | any>(response, `/api/admin/orders/${id}/status`);
     const updated = mapBackendOrderToAdmin(payload.order || payload);

@@ -282,6 +282,7 @@ export interface AdminOrderItem {
   customerName: string;
   customerEmail: string;
   total: number;
+  paymentMethod?: string;
   status: 'processing' | 'shipped' | 'delivered' | 'cancelled' | string;
   paymentStatus: 'paid' | 'refunded' | 'pending' | string;
   itemCount: number;

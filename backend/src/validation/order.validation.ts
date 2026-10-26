@@ -26,15 +26,29 @@ export const updateOrderStatusSchema = z.object({
   params: z.object({
     id: z.string().trim().min(1, 'Order ID is required'),
   }),
-  body: z.object({
-    status: z.preprocess(
-      (val) => (typeof val === 'string' ? val.toUpperCase() : val),
-      z.nativeEnum(OrderStatus, {
-        message: 'Invalid status. Must be PENDING, CONFIRMED, PROCESSING, SHIPPED, DELIVERED, or CANCELLED',
-      })
-    ),
-    notes: z.string().trim().optional(),
-  }),
+  body: z
+    .object({
+      status: z
+        .preprocess(
+          (val) => (typeof val === 'string' ? val.toUpperCase() : val),
+          z.nativeEnum(OrderStatus, {
+            message: 'Invalid status. Must be PENDING, CONFIRMED, PROCESSING, SHIPPED, DELIVERED, or CANCELLED',
+          }).optional()
+        )
+        .optional(),
+      paymentStatus: z
+        .preprocess(
+          (val) => (typeof val === 'string' ? val.toUpperCase() : val),
+          z.nativeEnum(PaymentStatus, {
+            message: 'Invalid payment status. Must be PENDING, PROCESSING, PAID, FAILED, REFUNDED, or PARTIALLY_REFUNDED',
+          }).optional()
+        )
+        .optional(),
+      notes: z.string().trim().optional(),
+    })
+    .refine((data) => data.status !== undefined || data.paymentStatus !== undefined || data.notes !== undefined, {
+      message: 'At least one field (status, paymentStatus, notes) must be provided for update',
+    }),
 });
 
 export const createFulfillmentSchema = z.object({

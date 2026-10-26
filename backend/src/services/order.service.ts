@@ -20,7 +20,7 @@ import {
   ProcessOrderRefundDTO,
   UpdateOrderStatusDTO,
 } from '../types/order.types';
-import { processOrderRefundCommission } from './commission.service';
+import { processOrderCommission, processOrderRefundCommission } from './commission.service';
 import { refundStripePayment } from './payment.service';
 
 export class OrderServiceError extends Error {
@@ -351,32 +351,82 @@ export const updateOrderStatus = async (
     throw new OrderServiceError(`Order '${idOrNumber}' not found`, 404);
   }
 
+  let shouldProcessCommission = false;
+
   await prisma.$transaction(async (tx) => {
-  await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${order.id} FOR UPDATE`;
-  await tx.orders.update({
-    where: { id: order.id },
-    data: {
-      status: input.status,
+    await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${order.id} FOR UPDATE`;
+
+    const updateData: Prisma.ordersUpdateInput = {
       updatedAt: new Date(),
-    },
+    };
+
+    if (input.status) {
+      updateData.status = input.status;
+    }
+
+    if (input.paymentStatus) {
+      updateData.paymentStatus = input.paymentStatus;
+      if (input.paymentStatus === PaymentStatus.PAID && order.paymentStatus !== PaymentStatus.PAID) {
+        shouldProcessCommission = true;
+      }
+
+      // Also keep payment_transactions aligned
+      const existingTx = await tx.payment_transactions.findFirst({
+        where: { orderId: order.id },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (existingTx) {
+        await tx.payment_transactions.update({
+          where: { id: existingTx.id },
+          data: {
+            status: input.paymentStatus,
+            updatedAt: new Date(),
+          },
+        });
+      } else if (input.paymentStatus === PaymentStatus.PAID) {
+        await tx.payment_transactions.create({
+          data: {
+            id: crypto.randomUUID(),
+            orderId: order.id,
+            paymentMethod: order.paymentMethod,
+            amount: order.totalAmount,
+            currency: order.currency,
+            status: PaymentStatus.PAID,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        });
+      }
+    }
+
+    await tx.orders.update({
+      where: { id: order.id },
+      data: updateData,
+    });
+
+    if (input.status === OrderStatus.CANCELLED) {
+      await processOrderRefundCommission(order.id, undefined, true, 'Order cancelled', tx);
+    }
+
+    if (input.notes) {
+      await tx.order_notes.create({
+        data: {
+          id: crypto.randomUUID(),
+          orderId: order.id,
+          authorRole: 'ADMIN',
+          note: input.notes,
+          isCustomerVisible: false,
+        },
+      });
+    }
   });
 
-  if (input.status === OrderStatus.CANCELLED) {
-    await processOrderRefundCommission(order.id, undefined, true, 'Order cancelled', tx);
-  }
-
-  if (input.notes) {
-    await tx.order_notes.create({
-      data: {
-        id: crypto.randomUUID(),
-        orderId: order.id,
-        authorRole: 'ADMIN',
-        note: input.notes,
-        isCustomerVisible: false,
-      },
+  if (shouldProcessCommission) {
+    await processOrderCommission(order.id).catch((err) => {
+      console.error(`[order.service] Failed to process commission for order ${order.id}:`, err?.message || err);
     });
   }
-  });
 
   return getOrderById(order.id);
 };

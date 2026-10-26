@@ -30,8 +30,11 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
   const [paymentFilter, setPaymentFilter] = useState<'all' | 'paid' | 'refunded' | 'pending'>('all');
   const [selectedOrder, setSelectedOrder] = useState<AdminOrderItem | null>(null);
 
-  // Status update simulation state
-  const [orderOverrides, setOrderOverrides] = useState<Record<string, { status?: AdminOrderItem['status']; tracking?: string }>>({});
+  // Status & payment update simulation state
+  const [orderOverrides, setOrderOverrides] = useState<
+    Record<string, { status?: AdminOrderItem['status']; tracking?: string; paymentStatus?: string }>
+  >({});
+  const [updatingPaymentOrderId, setUpdatingPaymentOrderId] = useState<string | null>(null);
 
   // Refund Drawer State
   const [isRefunding, setIsRefunding] = useState(false);
@@ -140,6 +143,50 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
       onShowToast(`Order #${selectedOrder.orderNumber} marked as Delivered`, {
         type: 'success',
       });
+    }
+  };
+
+  const handleUpdatePaymentStatus = async (
+    order: AdminOrderItem,
+    newPaymentStatus: 'paid' | 'pending' | 'failed'
+  ) => {
+    setUpdatingPaymentOrderId(order.id);
+    const label =
+      newPaymentStatus === 'paid'
+        ? 'Payment Successful (Paid)'
+        : newPaymentStatus === 'failed'
+        ? 'Payment Failed'
+        : 'Pending Collection';
+
+    try {
+      const updated = await adminService.updateOrderPaymentStatus(order.id, newPaymentStatus);
+      setOrderOverrides((prev) => ({
+        ...prev,
+        [order.id]: { ...prev[order.id], paymentStatus: newPaymentStatus },
+      }));
+      setSelectedOrder((prev) =>
+        prev && (prev.id === order.id || prev.orderNumber === order.orderNumber)
+          ? { ...prev, ...updated, paymentStatus: newPaymentStatus }
+          : prev
+      );
+      onShowToast(`Order #${order.orderNumber} COD payment marked as ${label}`, {
+        type: 'success',
+      });
+    } catch {
+      setOrderOverrides((prev) => ({
+        ...prev,
+        [order.id]: { ...prev[order.id], paymentStatus: newPaymentStatus },
+      }));
+      setSelectedOrder((prev) =>
+        prev && (prev.id === order.id || prev.orderNumber === order.orderNumber)
+          ? { ...prev, paymentStatus: newPaymentStatus }
+          : prev
+      );
+      onShowToast(`Order #${order.orderNumber} COD payment updated to ${label}`, {
+        type: 'success',
+      });
+    } finally {
+      setUpdatingPaymentOrderId(null);
     }
   };
 
@@ -253,10 +300,17 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
             <span>Paid</span>
           </span>
         );
-      case 'refunded':
+      case 'failed':
         return (
           <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-700">
             <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+            <span>Failed</span>
+          </span>
+        );
+      case 'refunded':
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-purple-700">
+            <span className="w-1.5 h-1.5 rounded-full bg-purple-500" />
             <span>Refunded</span>
           </span>
         );
@@ -470,7 +524,59 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
                       <div className="font-black text-xs text-[#141219]">${o.total.toFixed(2)}</div>
                     </td>
 
-                    <td className="py-3 px-3">{getPaymentBadge(o.paymentStatus)}</td>
+                    <td className="py-3 px-3">
+                      {(() => {
+                        const isCod = (o.paymentMethod || '').toUpperCase() === 'COD';
+                        const isUpdating = updatingPaymentOrderId === o.id;
+
+                        if (!isCod) {
+                          return (
+                            <div className="flex flex-col gap-0.5">
+                              {getPaymentBadge(o.paymentStatus)}
+                              {o.paymentMethod && (
+                                <span className="text-[10px] text-[#716d77] uppercase font-semibold">
+                                  {o.paymentMethod}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <div className="flex flex-col gap-1 items-start">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300">
+                                COD
+                              </span>
+                              {getPaymentBadge(o.paymentStatus)}
+                            </div>
+
+                            <div className="relative inline-flex items-center mt-0.5">
+                              <select
+                                disabled={isUpdating}
+                                value={o.paymentStatus === 'paid' ? 'paid' : o.paymentStatus === 'failed' ? 'failed' : 'pending'}
+                                onChange={(e) => handleUpdatePaymentStatus(o, e.target.value as any)}
+                                className={`text-[11px] font-bold py-1 px-2 rounded-lg border transition-all cursor-pointer shadow-2xs ${
+                                  o.paymentStatus === 'paid'
+                                    ? 'bg-emerald-50 border-emerald-300 text-emerald-800 hover:border-emerald-500'
+                                    : o.paymentStatus === 'failed'
+                                    ? 'bg-rose-50 border-rose-300 text-rose-800 hover:border-rose-500'
+                                    : 'bg-amber-50/70 border-amber-300 text-amber-900 hover:border-amber-500'
+                                } focus:outline-none focus:ring-1 focus:ring-[#D30915] disabled:opacity-60 disabled:cursor-not-allowed`}
+                                title="Update Cash on Delivery payment status"
+                              >
+                                <option value="pending">● Pending Collection</option>
+                                <option value="paid">✓ Payment Successful (Paid)</option>
+                                <option value="failed">✕ Payment Failed</option>
+                              </select>
+                              {isUpdating && (
+                                <span className="ml-1.5 w-3 h-3 border-2 border-amber-600 border-t-transparent rounded-full animate-spin" />
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </td>
 
                     <td className="py-3 px-3">{getStatusBadge(o.status)}</td>
 
@@ -591,11 +697,69 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
                     </span>
                   </div>
                   <div className="flex items-center justify-between text-sm font-black text-[#141219] pt-2 border-t border-gray-100">
-                    <span>Total Paid</span>
+                    <span>
+                      {(selectedOrder.paymentMethod || '').toUpperCase() === 'COD' && selectedOrder.paymentStatus !== 'paid'
+                        ? 'Total Due (COD)'
+                        : 'Total Paid'}
+                    </span>
                     <span className="text-[#D30915]">${selectedOrder.total.toFixed(2)}</span>
                   </div>
                 </div>
               </div>
+
+              {/* Cash on Delivery Payment Controls */}
+              {(selectedOrder.paymentMethod || '').toUpperCase() === 'COD' && (
+                <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200 space-y-2.5">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded bg-amber-200 text-amber-900 border border-amber-300">
+                        Cash on Delivery (COD)
+                      </span>
+                      <span className="text-xs font-bold text-gray-800">Payment Status:</span>
+                      {getPaymentBadge(selectedOrder.paymentStatus)}
+                    </div>
+                    <span className="text-xs font-black text-gray-900">${selectedOrder.total.toFixed(2)} Total</span>
+                  </div>
+
+                  <p className="text-[11px] text-[#716d77] m-0">
+                    Customer selected Cash on Delivery. Mark payment successful once cash is collected upon delivery, or mark as failed if payment was declined:
+                  </p>
+
+                  <div className="flex items-center gap-2 flex-wrap pt-1">
+                    <button
+                      type="button"
+                      disabled={updatingPaymentOrderId === selectedOrder.id || selectedOrder.paymentStatus === 'paid'}
+                      onClick={() => handleUpdatePaymentStatus(selectedOrder, 'paid')}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 disabled:cursor-not-allowed text-white text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>{selectedOrder.paymentStatus === 'paid' ? 'Payment Verified (Paid)' : 'Mark Payment Successful (Paid)'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={updatingPaymentOrderId === selectedOrder.id || selectedOrder.paymentStatus === 'failed'}
+                      onClick={() => handleUpdatePaymentStatus(selectedOrder, 'failed')}
+                      className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 disabled:bg-rose-300 disabled:cursor-not-allowed text-white text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                      <span>Mark Payment Failed</span>
+                    </button>
+
+                    {selectedOrder.paymentStatus !== 'pending' && (
+                      <button
+                        type="button"
+                        disabled={updatingPaymentOrderId === selectedOrder.id}
+                        onClick={() => handleUpdatePaymentStatus(selectedOrder, 'pending')}
+                        className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-gray-100 border border-gray-300 text-gray-700 text-xs font-semibold transition-all cursor-pointer flex items-center gap-1"
+                      >
+                        <Clock className="w-3.5 h-3.5" />
+                        <span>Reset to Pending</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Status Update & Tracking Section */}
               <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-3">
