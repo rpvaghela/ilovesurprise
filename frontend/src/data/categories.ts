@@ -22,6 +22,16 @@ export const categoriesData: Category[] = [
     featured: true,
   },
   {
+    id: '1779da67-aa64-4840-af06-5e87ad1af4be',
+    name: 'Jewelry Candles',
+    slug: 'jewelry-candles',
+    tagline: 'Luxury jewelry in every candle',
+    description: 'Hand-poured aromatic soy candles with a real ring, necklace, or earrings valued up to $7,500 inside.',
+    itemCount: 100,
+    image: '/assets/ilovesurprises/categories/1_Mockup_Jewelry_JewelryCandles_93d459aa-d530-474d-ba4c-32fb9af4f94c.jpg',
+    featured: true,
+  },
+  {
     id: 'cat-cash-candles',
     name: 'Cash Candles',
     slug: 'cash-candles',

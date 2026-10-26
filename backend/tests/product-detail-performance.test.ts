@@ -82,6 +82,20 @@ describe('Single-round-trip product details', () => {
     expect(await getProductByIdOrSlug(slug)).toMatchObject({ price: 18.75, stock: 0, inStock: false });
   });
 
+  it('resolves the selected collection to a valid product category', async () => {
+    await updateProduct(id, { categorySlug: 'detail-collection' });
+
+    const updated = await prisma.products.findUniqueOrThrow({
+      where: { id },
+      include: { categories: true },
+    });
+    expect(updated.categories).toMatchObject({
+      name: 'Collection',
+      slug: 'detail-collection',
+    });
+    expect(updated.categoryId).toBe(updated.categories?.id);
+  });
+
   it('invalidates product details after deletion', async () => {
     const created = await createProduct({ name: 'Delete Performance Fixture', slug: 'delete-performance-fixture', price: 12 });
     await getProductByIdOrSlug(created.slug);

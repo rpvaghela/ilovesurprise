@@ -191,15 +191,21 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
     []
   );
 
-  const formCategoryOptions: AdminSelectOption[] = useMemo(
-    () =>
-      collections.map((c) => ({
-        value: c.slug,
-        label: c.name,
-        badge: c.featured ? 'Featured' : undefined,
-      })),
-    [collections]
-  );
+  const formCategoryOptions: AdminSelectOption[] = useMemo(() => {
+    const list = collections.map((c) => ({
+      value: c.slug,
+      label: c.name,
+      badge: c.featured ? 'Featured' : undefined,
+    }));
+    if (formCategory && !list.some((opt) => opt.value === formCategory)) {
+      list.unshift({
+        value: formCategory,
+        label: formCategory.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+        badge: 'Current',
+      });
+    }
+    return list;
+  }, [collections, formCategory]);
 
   const formStatusOptions: AdminSelectOption[] = useMemo(
     () => [
@@ -361,29 +367,32 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
 
   const handleOpenEdit = (p: AdminProductItem) => {
     setEditingProductId(p.id);
-    setFormName(p.name);
+    setFormName(p.name || '');
     setOriginalDescription(p.description || '');
     setFormDescription(descriptionHtmlToText(p.description || ''));
     setIsDescriptionDirty(false);
     setIsDescriptionPreview(false);
     setFormCategory(
       p.collectionSlugs?.[0] ||
-      collections.find((collection) => collection.name.toLowerCase() === p.category.toLowerCase())?.slug ||
+      collections.find((collection) => collection.name.toLowerCase() === (p.category || '').toLowerCase())?.slug ||
+      collections[0]?.slug ||
       ''
     );
-    setFormPrice(p.price.toString());
+    setFormPrice(p.price != null ? p.price.toString() : '29.99');
     setFormOriginalPrice(p.originalPrice == null ? '' : p.originalPrice.toString());
-    setFormSku(p.sku);
-    setFormStock(p.stock.toString());
+    setFormSku(p.sku || '');
+    setFormStock((p.stock ?? 50).toString());
     setFormLowStockThreshold((p.lowStockThreshold ?? 10).toString());
     setFormSurpriseType(p.surpriseType || 'cash');
     setFormSurpriseValue(p.surpriseValue == null ? '' : String(p.surpriseValue));
     setFormIsBestSeller(Boolean(p.isBestSeller));
     setFormStatus(p.status || 'active');
-    setFormImages(p.images && p.images.length > 0 ? p.images : (p.image ? [p.image] : []));
+    setFormImages(
+      (p.images && p.images.length > 0 ? p.images : (p.image ? [p.image] : [])).filter(Boolean)
+    );
     setFormOptions(p.options || []);
     setFormVariants(p.variants || []);
-    setFormSlug(p.slug || slugify(p.name));
+    setFormSlug(p.slug || slugify(p.name || ''));
     setIsSlugManual(true);
     setFormTags(Array.isArray(p.tags) ? p.tags.join(', ') : ((p as any).tags || ''));
     setFormSeoTitle(p.seoTitle || '');
@@ -549,13 +558,17 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
       .filter(Boolean);
 
     const selectedCollection = collections.find((collection) => collection.slug === formCategory);
+    const categoryName =
+      selectedCollection?.name ||
+      (formCategory ? formCategory.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) : '');
+    const cleanSku = (formSku || '').trim();
     const payload: Partial<AdminProductItem> = {
-      name: formName.trim(),
-      category: selectedCollection?.name || '',
+      name: (formName || '').trim(),
+      category: categoryName,
       price,
       originalPrice: compareAtPrice,
       description: isDescriptionDirty ? descriptionTextToHtml(formDescription) : originalDescription,
-      sku: formSku.trim(),
+      sku: cleanSku || undefined,
       stock,
       lowStockThreshold,
       surpriseType: formSurpriseType,
@@ -566,12 +579,12 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
       variants: formVariants,
       isBestSeller: formIsBestSeller,
       status: formStatus,
-      slug: formSlug.trim() || slugify(formName) || undefined,
+      slug: (formSlug || '').trim() || slugify(formName) || undefined,
       collectionSlugs: formCategory ? [formCategory] : [],
       tags: parsedTags.length > 0 ? parsedTags : undefined,
-      seoTitle: formSeoTitle.trim() || undefined,
-      metaDescription: formMetaDescription.trim() || undefined,
-      imageAltText: formImageAltText.trim() || undefined,
+      seoTitle: (formSeoTitle || '').trim() || undefined,
+      metaDescription: (formMetaDescription || '').trim() || undefined,
+      imageAltText: (formImageAltText || '').trim() || undefined,
     };
 
     setIsSavingProduct(true);
@@ -579,6 +592,14 @@ export const AdminProducts: React.FC<AdminProductsProps> = ({
       if (editingProductId) {
         if (!onEditProduct) throw new Error('Product editing is unavailable.');
         await onEditProduct(editingProductId, payload);
+        // Immediately sync search results in state
+        setServerSearchResults((prev) =>
+          prev
+            ? prev.map((item) =>
+                item.id === editingProductId ? { ...item, ...payload, category: categoryName } : item
+              )
+            : null
+        );
       } else {
         if (!onAddProduct) throw new Error('Product creation is unavailable.');
         await onAddProduct(payload);

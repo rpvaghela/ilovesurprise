@@ -50,10 +50,10 @@ export const Home: React.FC<HomeProps> = ({
     const timer = setTimeout(() => {
       if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
         idleId = (window as any).requestIdleCallback(() => {
-          productService.getProductsByCollection('jewelry-candles', { page: 1, limit: 15, sort: 'featured' }).catch(() => { });
+          productService.getProductsByCollection('jewelry-candles', { page: 1, limit: 8, sort: 'featured' }).catch(() => { });
         });
       } else {
-        productService.getProductsByCollection('jewelry-candles', { page: 1, limit: 15, sort: 'featured' }).catch(() => { });
+        productService.getProductsByCollection('jewelry-candles', { page: 1, limit: 8, sort: 'featured' }).catch(() => { });
       }
     }, 1200);
 

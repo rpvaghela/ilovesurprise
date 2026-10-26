@@ -63,6 +63,7 @@ export interface Product {
   badge?: string;
   isNew?: boolean;
   isBestSeller?: boolean;
+  createdAt?: Date | string;
   inStock: boolean;
   stock?: number;
   scentNotes?: string[];

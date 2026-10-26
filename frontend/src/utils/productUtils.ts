@@ -1,5 +1,52 @@
 import type { Product } from '../types';
 
+export type ProductSortOption =
+  | 'featured'
+  | 'price-asc'
+  | 'price-desc'
+  | 'rating'
+  | 'best-sellers'
+  | 'newest';
+
+export function sortProductsForDisplay(
+  products: Product[],
+  sort: ProductSortOption
+): Product[] {
+  const sorted = [...products];
+
+  switch (sort) {
+    case 'price-asc':
+      sorted.sort((a, b) => a.price - b.price);
+      break;
+    case 'price-desc':
+      sorted.sort((a, b) => b.price - a.price);
+      break;
+    case 'rating':
+      sorted.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+      break;
+    case 'best-sellers':
+      sorted.sort((a, b) => Number(Boolean(b.isBestSeller)) - Number(Boolean(a.isBestSeller)));
+      break;
+    case 'newest': {
+      const getTimestamp = (product: Product) => {
+        const timestamp = product.createdAt ? new Date(product.createdAt).getTime() : 0;
+        return Number.isFinite(timestamp) ? timestamp : 0;
+      };
+      const timestamps = sorted.map(getTimestamp);
+      if (timestamps.some((timestamp) => Number.isFinite(timestamp) && timestamp > 0)) {
+        sorted.sort((a, b) => getTimestamp(b) - getTimestamp(a));
+      } else {
+        sorted.reverse();
+      }
+      break;
+    }
+    case 'featured':
+      break;
+  }
+
+  return sorted;
+}
+
 /**
  * Deduplicates an array of products strictly by product.id (with fallback to slug).
  * Preserves first-seen product order and attributes.

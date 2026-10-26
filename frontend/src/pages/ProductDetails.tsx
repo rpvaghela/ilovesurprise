@@ -398,6 +398,30 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
     return /\b(ring|rings|necklace|necklaces|earring|earrings|bracelet|bracelets|jewelry)\b/i.test(name);
   }, [product, auditDropdownStatus]);
 
+  const displayCategory = useMemo(() => {
+    const cat = (product.category || '').toLowerCase();
+    const name = (product.name || '').toLowerCase();
+    const slug = (product.slug || '').toLowerCase();
+    const badge = (product.badge || '').toLowerCase();
+
+    if (
+      cat === 'jewelry candles' ||
+      badge === 'jewelry candles' ||
+      name.includes('jewelry candle') ||
+      name.includes('jewelry-candle') ||
+      slug.includes('jewelry-candle') ||
+      (cat === 'jewelry' && (name.includes('candle') || slug.includes('candle')))
+    ) {
+      return 'Jewelry Candles';
+    }
+
+    if (cat === 'jewelry that makes every moment shine') {
+      return 'Jewelry';
+    }
+
+    return product.category;
+  }, [product.category, product.name, product.slug, product.badge]);
+
 
 
 
@@ -1042,7 +1066,7 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
             alternateImages={alternateImages}
             badge={product.badge}
             surpriseValue={product.surpriseValue}
-            category={product.category}
+            category={displayCategory}
             slugOrId={product.slug || product.id}
           />
           {/* Floating Wishlist Heart on Gallery */}
@@ -1071,7 +1095,7 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
             {/* Category & Ratings Badge */}
             <div className="flex items-center justify-between gap-2 mb-2">
               <span className="text-[11px] font-black uppercase tracking-wider text-[#D30915] bg-[#fff1f2] px-3 py-1 rounded-full border border-[#fecdd3]">
-                {product.category}
+                {displayCategory}
               </span>
 
               {productReviewCount > 0 && averageRating > 0 ? (
@@ -2099,7 +2123,7 @@ export const ProductDetails: React.FC<ProductDetailsProps> = ({
           <div className="flex items-center justify-between mb-6">
             <div>
               <span className="block text-[10px] sm:text-[11px] font-black uppercase tracking-wider text-[#D30915] mb-1">
-                More in {product.category}
+                More in {displayCategory}
               </span>
               <h3 className="text-xl sm:text-2xl font-black text-[#141219] m-0 font-display">
                 You May Also Love

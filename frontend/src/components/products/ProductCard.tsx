@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Heart, Plus, Minus, Star, Gift } from 'lucide-react';
 import type { Product } from '../../types';
-import { resolveProductImage, cacheProduct } from '../../services/productService';
+import { resolveProductImage, cacheProduct, getProductImageSrcSet } from '../../services/productService';
 import { handleImageErrorSafely, getCategoryFallback } from '../../utils/imageUtils';
 
 interface ProductCardProps {
@@ -12,6 +12,7 @@ interface ProductCardProps {
   onToggleWishlist?: (productId: string) => void;
   onSelectProduct?: (product: Product) => void;
   isWishlisted?: boolean;
+  priority?: boolean;
 }
 
 export const ProductCard: React.FC<ProductCardProps> = React.memo(({
@@ -22,6 +23,7 @@ export const ProductCard: React.FC<ProductCardProps> = React.memo(({
   onToggleWishlist,
   onSelectProduct,
   isWishlisted = false,
+  priority = false,
 }) => {
   const resolvedInitial = resolveProductImage(product.image, product.name, product.category, product.slug || product.id);
   const [currentSrc, setCurrentSrc] = useState<string>(resolvedInitial);
@@ -102,12 +104,38 @@ export const ProductCard: React.FC<ProductCardProps> = React.memo(({
     const cat = (product.category || '').toLowerCase();
     const name = (product.name || '').toLowerCase();
     const isBath = cat.includes('bath') || cat.includes('bomb') || name.includes('bath') || name.includes('bomb');
+    const isJewelry = cat.includes('jewelry') || name.includes('jewelry');
     if (product.badge && product.badge.toLowerCase() === 'candles') {
+      if (isJewelry) return 'JEWELRY CANDLES';
       if (isBath) return 'BATH BOMB';
       if (isNonCandle) return null;
     }
     return product.badge;
   }, [product.badge, product.category, product.name, isNonCandle]);
+
+  const displayCategory = useMemo(() => {
+    const cat = (product.category || '').toLowerCase();
+    const name = (product.name || '').toLowerCase();
+    const slug = (product.slug || '').toLowerCase();
+    const badge = (product.badge || '').toLowerCase();
+
+    if (
+      cat === 'jewelry candles' ||
+      badge === 'jewelry candles' ||
+      name.includes('jewelry candle') ||
+      name.includes('jewelry-candle') ||
+      slug.includes('jewelry-candle') ||
+      (cat === 'jewelry' && (name.includes('candle') || slug.includes('candle')))
+    ) {
+      return 'Jewelry Candles';
+    }
+
+    if (cat === 'jewelry that makes every moment shine') {
+      return 'Jewelry';
+    }
+
+    return product.category;
+  }, [product.category, product.name, product.slug, product.badge]);
 
   const sanitizedSurpriseValue = useMemo(() => {
     if (!product.surpriseValue) return '';
@@ -137,11 +165,14 @@ export const ProductCard: React.FC<ProductCardProps> = React.memo(({
       <div className="relative w-full aspect-square shrink-0 rounded-[12px] sm:rounded-[14px] overflow-hidden bg-white border border-[#f5edf2] mb-2 sm:mb-2.5 flex items-center justify-center isolate">
         <img
           src={currentSrc}
+          srcSet={getProductImageSrcSet(currentSrc)}
+          sizes="(max-width: 640px) 180px, (max-width: 1024px) 240px, 360px"
           alt={product.name}
-          width={400}
-          height={400}
+          width={360}
+          height={360}
           className="absolute inset-0 w-full h-full object-contain p-1 sm:p-1.5 transition-transform duration-500 ease-out group-hover:scale-105"
-          loading="lazy"
+          loading={priority ? 'eager' : 'lazy'}
+          fetchPriority={priority ? 'high' : 'auto'}
           decoding="async"
           onError={handleImageError}
         />
@@ -157,7 +188,7 @@ export const ProductCard: React.FC<ProductCardProps> = React.memo(({
               {discountPercent}% OFF
             </span>
           ) : sanitizedBadge ? (
-            <span className="px-1.5 sm:px-2 py-0.5 rounded-[6px] sm:rounded-full bg-[#141219] text-white text-[8px] sm:text-[9px] font-black uppercase tracking-wider shadow-xs truncate max-w-[76px] sm:max-w-[90px]">
+            <span className="px-1.5 sm:px-2 py-0.5 rounded-[6px] sm:rounded-full bg-[#141219] text-white text-[8px] sm:text-[9px] font-black uppercase tracking-wider shadow-xs truncate max-w-[105px] sm:max-w-[125px]">
               {sanitizedBadge}
             </span>
           ) : null}
@@ -200,7 +231,7 @@ export const ProductCard: React.FC<ProductCardProps> = React.memo(({
           {/* Rating & Category */}
           <div className="flex items-center justify-between gap-1 text-[9.5px] sm:text-[10px] mb-1">
             <span className="font-bold text-[#716d77] uppercase tracking-wider truncate max-w-[62%] sm:max-w-[68%]">
-              {product.category}
+              {displayCategory}
             </span>
             {product.reviewCount > 0 && product.rating > 0 ? (
               <div className="flex items-center gap-0.5 font-extrabold text-[#141219] shrink-0">

@@ -35,6 +35,7 @@ import { apiClient, ApiError, unwrap, type ApiResponse } from './apiClient';
 import { analyticsService } from './analyticsService';
 import { cmsService } from './cmsService';
 import { accountService } from './accountService';
+import { productService } from './productService';
 
 /**
  * Admin service.
@@ -844,6 +845,9 @@ export function mergeStorefrontIntoHomepageContent(
 /** Notifies admin and storefront views that server-side data changed. */
 function notifyAdminDataChanged(): void {
   if (typeof window === 'undefined') return;
+  try {
+    productService.clearCache();
+  } catch {}
   window.dispatchEvent(new CustomEvent('ils_admin_updated'));
   window.dispatchEvent(new CustomEvent('ils_catalog_updated'));
 }
@@ -1940,8 +1944,16 @@ export const adminService = {
         : Number(updates.surpriseValue);
     }
     if (updates.slug !== undefined) body.slug = updates.slug.trim();
-    if (updates.collectionSlugs !== undefined) {
+    if (updates.collectionSlugs !== undefined && updates.collectionSlugs.length > 0) {
+      body.categorySlug = updates.collectionSlugs[0] || null;
       body.collectionSlug = updates.collectionSlugs[0] || null;
+    } else if (updates.category) {
+      const foundCol = categoriesData.find(
+        (c) => c.name.toLowerCase() === updates.category?.toLowerCase() || c.slug === updates.category
+      );
+      const catSlug = foundCol?.slug || updates.category.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      body.categorySlug = catSlug;
+      body.collectionSlug = catSlug;
     }
     if (updates.options !== undefined) body.options = updates.options;
 

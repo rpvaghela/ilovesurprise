@@ -1801,7 +1801,7 @@ export const Header: React.FC<HeaderProps> = ({
                   c.id !== 'appraisal' &&
                   c.slug !== 'contact'
               ).map((cat) => {
-                const hasSub = Boolean(cat.columns && cat.columns.length > 0);
+                const hasSub = cat.id !== 'jewelry' && Boolean(cat.columns && cat.columns.length > 0);
                 const isMegaActive = activeMegaCategory === cat.id;
 
                 return (
@@ -1858,7 +1858,7 @@ export const Header: React.FC<HeaderProps> = ({
                           {cat.badge}
                         </span>
                       )}
-                      {hasSub && (
+                      {hasSub && cat.id !== 'jewelry' && (
                         <ChevronDown
                           className={`w-3.5 h-3.5 text-[#716d77] transition-transform duration-200 group-hover:text-[#D30915] ${isMegaActive ? 'rotate-180 text-[#D30915]' : ''
                             }`}
@@ -1993,7 +1993,9 @@ export const Header: React.FC<HeaderProps> = ({
                         className="group/all inline-flex items-center gap-1.5 text-xs font-bold text-[#D30915] hover:text-[#B60711] transition-colors cursor-pointer whitespace-nowrap"
                       >
                         <span>{cat.viewAllLabel || `View All ${cat.name}`}</span>
-                        <ArrowRight className="w-3.5 h-3.5 group-hover/all:translate-x-1 transition-transform" />
+                        {cat.id !== 'jewelry' && (
+                          <ArrowRight className="w-3.5 h-3.5 group-hover/all:translate-x-1 transition-transform" />
+                        )}
                       </a>
                     </div>
 
@@ -2199,7 +2201,9 @@ export const Header: React.FC<HeaderProps> = ({
                                 {cat.spotlight.title}
                               </strong>
                               <span className="text-[10.5px] font-bold text-[#D30915] flex items-center gap-1 shrink-0 whitespace-nowrap">
-                                Shop <ArrowRight className="w-3 h-3 group-hover/promo:translate-x-1 transition-transform" />
+                                Shop {cat.id !== 'jewelry' && (
+                                  <ArrowRight className="w-3 h-3 group-hover/promo:translate-x-1 transition-transform" />
+                                )}
                               </span>
                             </div>
                           </div>
@@ -2286,7 +2290,7 @@ export const Header: React.FC<HeaderProps> = ({
                 <div className="space-y-1.5">
                   {NAVIGATION_CATEGORIES.map((cat) => {
                     const isExpanded = expandedMobileCategory === cat.id;
-                    const hasSub = Boolean(cat.columns && cat.columns.length > 0);
+                    const hasSub = cat.id !== 'jewelry' && Boolean(cat.columns && cat.columns.length > 0);
 
                     if (!hasSub) {
                       const isRouteActive =
@@ -2324,6 +2328,11 @@ export const Header: React.FC<HeaderProps> = ({
                                   : 'Become a Representative'
                                 : cat.name}
                             </span>
+                            {cat.id === 'jewelry' && cat.badge && (
+                              <span className="text-[8.5px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[#FF3366] text-white">
+                                {cat.badge}
+                              </span>
+                            )}
                           </div>
                           <ArrowRight className="w-3.5 h-3.5 text-[#beb8c2]" />
                         </a>

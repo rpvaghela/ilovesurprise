@@ -20,9 +20,13 @@ interface CacheEntry<T> {
 const productListCache = new Map<string, CacheEntry<any>>();
 const productDetailCache = new Map<string, CacheEntry<ProductResponseDTO>>();
 const productDetailRequests = new Map<string, Promise<ProductResponseDTO>>();
+const categoryResolutionCache = new Map<string, { categoryIds: string[]; collectionIds: string[] }>();
+let globalProductCountCache: { count: number; timestamp: number } | null = null;
+const GLOBAL_COUNT_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
 let productCacheVersion = 0;
 const LIST_CACHE_TTL_MS = 60 * 60 * 1000;   // 1 hour
-const DETAIL_CACHE_TTL_MS = 60 * 1000; // Bound staleness from inventory changes outside this service.
+const DETAIL_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour memory fresh; invalidated on updates
 
 function getCached<T>(cache: Map<string, CacheEntry<T>>, key: string): T | null {
   const entry = cache.get(key);
@@ -41,6 +45,8 @@ export function invalidateProductCaches(): void {
   productListCache.clear();
   productDetailCache.clear();
   productDetailRequests.clear();
+  categoryResolutionCache.clear();
+  globalProductCountCache = null;
 }
 
 /**
@@ -50,28 +56,27 @@ export function invalidateProductCaches(): void {
 export async function warmupProductCatalog(): Promise<void> {
   console.log('🚀 Pre-warming product catalog and collection caches...');
   const warmupQueries: ListProductsQueryDTO[] = [
+    { limit: 12 },
+    { limit: 10 },
+    { limit: 16 },
     { limit: 20 },
-    { limit: 60 },
-    { featured: true, limit: 20 },
-    { search: 'halloween', limit: 10 },
-    { search: 'halloween', limit: 20 },
-    { search: 'christmas', limit: 10 },
-    { search: 'christmas', limit: 20 },
-    { search: 'cash candle', limit: 10 },
-    { search: 'cash candle', limit: 20 },
-    { search: 'jewelry candle', limit: 10 },
-    { search: 'jewelry candle', limit: 20 },
-    { search: 'zodiac', limit: 10 },
-    { search: 'zodiac', limit: 20 },
-    { search: 'candle', limit: 20 },
-    { search: 'wax melt', limit: 20 },
-    { search: 'bath bomb', limit: 20 },
-    { search: 'soap', limit: 20 },
-    { search: 'jewelry', limit: 20 },
-    { search: 'candy', limit: 20 },
-    { search: 'chocolate', limit: 20 },
-    { search: 'slime', limit: 20 },
-    { search: 'greeting card', limit: 20 },
+    { featured: true, limit: 12 },
+    { category: 'candles', limit: 12 },
+    { category: 'jewelry-candles', limit: 12 },
+    { category: 'cash-candles', limit: 12 },
+    { category: 'cash-money-candles', limit: 12 },
+    { category: 'wax-melts', limit: 12 },
+    { category: 'bath-bombs', limit: 12 },
+    { category: 'soaps', limit: 12 },
+    { category: 'candy', limit: 12 },
+    { category: 'chocolates', limit: 12 },
+    { category: 'slimes', limit: 12 },
+    { category: 'greeting-cards', limit: 12 },
+    { search: 'halloween', limit: 12 },
+    { search: 'christmas', limit: 12 },
+    { search: 'cash candle', limit: 12 },
+    { search: 'jewelry candle', limit: 12 },
+    { search: 'zodiac', limit: 12 },
   ];
 
   try {
@@ -80,7 +85,24 @@ export async function warmupProductCatalog(): Promise<void> {
       const chunk = warmupQueries.slice(i, i + 3);
       await Promise.allSettled(chunk.map((q) => listProducts(q)));
     }
-    console.log(`✅ Pre-warmed ${warmupQueries.length} collections and category queries in memory.`);
+
+    // Pre-warm top collection batch handles into detail cache for 0ms cold load
+    const topBatchHandles = [
+      'back-and-body-hurts-happy-birthday-jewelry-candle',
+      'birthday-cake-jewelry-candle',
+      'bahama-mama-jewelry-candle',
+      'bedtime-spa-jewelry-candle',
+      'baked-apple-pie-jewelry-candle',
+      'black-raspberry-vanilla-jewelry-candle',
+      'cinnamon-apple-jewelry-candle',
+      'blueberry-muffin-jewelry-candle',
+      'birthday-cake-cash-money-candle',
+      'bahama-mama-cash-money-candle',
+      'happy-birthday-to-you-cash-money-candle',
+      'baked-apple-pie-cash-money-candle',
+    ];
+    await getProductsBatch(topBatchHandles);
+    console.log(`✅ Pre-warmed ${warmupQueries.length} collection queries and ${topBatchHandles.length} batch products in memory.`);
   } catch (err: any) {
     console.warn('Warmup encountered partial error (non-fatal):', err?.message);
   }
@@ -528,19 +550,33 @@ export const formatDbProduct = (product: any): ProductResponseDTO => {
     };
   });
 
-  return {
-    id: product.id,
-    name: product.name,
-    slug: product.slug,
-    shortDescription: product.shortDescription,
-    description: product.description,
-    price: Number(product.price),
-    compareAtPrice: product.compareAtPrice ? Number(product.compareAtPrice) : null,
-    imageUrl: product.imageUrl || (images[0] || null),
-    images,
-    categoryId: product.categoryId || (primaryCollection?.id ? `cat-${primaryCollection.slug}` : null),
-    categoryName: product.categories?.name || primaryCollection?.name || product.badge || 'CANDLES',
-    badge: product.badge || primaryCollection?.name || 'CANDLES',
+    const isJewelryCandle = Boolean(
+      product.categories?.slug === 'jewelry-candles' ||
+      product.categories?.name === 'Jewelry Candles' ||
+      (product.slug && product.slug.includes('jewelry-candle')) ||
+      (product.name && /jewelry\s*candle/i.test(product.name))
+    );
+
+    const resolvedCategoryName = product.categories?.name || (isJewelryCandle ? 'Jewelry Candles' : primaryCollection?.name || product.badge || 'CANDLES');
+    const resolvedBadge = (product.badge && product.badge.toUpperCase() !== 'CANDLES')
+      ? product.badge
+      : isJewelryCandle
+        ? (product.isBestSeller ? 'BESTSELLER' : 'JEWELRY CANDLES')
+        : (primaryCollection?.name || product.badge || 'CANDLES');
+
+    return {
+      id: product.id,
+      name: product.name,
+      slug: product.slug,
+      shortDescription: product.shortDescription,
+      description: product.description,
+      price: Number(product.price),
+      compareAtPrice: product.compareAtPrice ? Number(product.compareAtPrice) : null,
+      imageUrl: product.imageUrl || (images[0] || null),
+      images,
+      categoryId: product.categoryId || (primaryCollection?.id ? `cat-${primaryCollection.slug}` : (isJewelryCandle ? '1779da67-aa64-4840-af06-5e87ad1af4be' : null)),
+      categoryName: resolvedCategoryName,
+      badge: resolvedBadge,
     collections,
     rating,
     reviewCount,
@@ -630,27 +666,55 @@ export const listProducts = async (query: ListProductsQueryDTO): Promise<{
 
     if (query.category) {
       const catTrimmed = query.category.trim();
-      conditions.push({
-        OR: [
-          { categoryId: catTrimmed },
-          { categories: { slug: { equals: catTrimmed, mode: 'insensitive' } } },
-          { categories: { name: { contains: catTrimmed, mode: 'insensitive' } } },
-          { badge: { contains: catTrimmed, mode: 'insensitive' } },
-          {
-            product_collections: {
-              some: {
-                collections: {
-                  OR: [
-                    { slug: { equals: catTrimmed, mode: 'insensitive' } },
-                    { name: { contains: catTrimmed, mode: 'insensitive' } },
-                    { id: catTrimmed },
-                  ],
-                },
-              },
+      const catKey = catTrimmed.toLowerCase();
+      let res = categoryResolutionCache.get(catKey);
+      if (!res) {
+        const [cats, cols] = await Promise.all([
+          prisma.categories.findMany({
+            where: {
+              OR: [
+                { id: catTrimmed },
+                { slug: { equals: catTrimmed, mode: 'insensitive' } },
+                { name: { contains: catTrimmed, mode: 'insensitive' } },
+              ],
+            },
+            select: { id: true },
+          }),
+          prisma.collections.findMany({
+            where: {
+              OR: [
+                { id: catTrimmed },
+                { slug: { equals: catTrimmed, mode: 'insensitive' } },
+                { name: { contains: catTrimmed, mode: 'insensitive' } },
+              ],
+            },
+            select: { id: true },
+          }),
+        ]);
+        res = {
+          categoryIds: cats.map((c) => c.id),
+          collectionIds: cols.map((c) => c.id),
+        };
+        categoryResolutionCache.set(catKey, res);
+      }
+
+      const orConds: Prisma.productsWhereInput[] = [];
+      if (res.categoryIds.length > 0) {
+        orConds.push({ categoryId: { in: res.categoryIds } });
+      }
+      if (res.collectionIds.length > 0) {
+        orConds.push({
+          product_collections: {
+            some: {
+              collectionId: { in: res.collectionIds },
             },
           },
-        ],
-      });
+        });
+      }
+      orConds.push({ badge: { contains: catTrimmed, mode: 'insensitive' } });
+      if (orConds.length > 0) {
+        conditions.push({ OR: orConds });
+      }
     }
 
     const where: Prisma.productsWhereInput = conditions.length > 0 ? { AND: conditions } : {};
@@ -662,44 +726,47 @@ export const listProducts = async (query: ListProductsQueryDTO): Promise<{
     else if (query.sortBy === 'bestseller') orderBy.isBestSeller = 'desc';
     else orderBy.createdAt = 'desc';
 
-    const dbProducts = await prisma.products.findMany({
+    const findManyPromise = prisma.products.findMany({
       where,
       skip,
       take: limit,
       orderBy,
       include: {
-        categories: true,
-        product_images: { orderBy: { sortOrder: 'asc' } },
-        product_variants: true,
-        product_reviews: {
-          where: { isApproved: true, isVerifiedPurchase: true },
-          select: { rating: true },
-        },
-        product_options: {
-          include: {
-            product_option_values: { orderBy: { sortOrder: 'asc' } },
-          },
+        categories: { select: { id: true, name: true, slug: true } },
+        product_images: {
+          take: 2,
+          orderBy: { sortOrder: 'asc' },
+          select: { url: true, isPrimary: true, sortOrder: true },
         },
         product_collections: {
+          take: 2,
           orderBy: { sortOrder: 'asc' },
           include: {
             collections: {
               select: { id: true, name: true, slug: true },
             },
           },
-          take: 5,
         },
       },
     });
 
-    if (dbProducts.length > 0) {
-      let dbTotal = dbProducts.length;
-      if (page === 1 && dbProducts.length < limit) {
-        dbTotal = dbProducts.length;
+    let countPromise: Promise<number>;
+    if (conditions.length === 0) {
+      if (globalProductCountCache && Date.now() - globalProductCountCache.timestamp < GLOBAL_COUNT_TTL_MS) {
+        countPromise = Promise.resolve(globalProductCountCache.count);
       } else {
-        dbTotal = await prisma.products.count({ where });
+        countPromise = prisma.products.count().then((c) => {
+          globalProductCountCache = { count: c, timestamp: Date.now() };
+          return c;
+        });
       }
+    } else {
+      countPromise = prisma.products.count({ where });
+    }
 
+    const [dbProducts, dbTotal] = await Promise.all([findManyPromise, countPromise]);
+
+    if (dbProducts.length > 0) {
       const result = {
         products: dbProducts.map(formatDbProduct),
         pagination: {
@@ -817,30 +884,47 @@ export const getProductsBatch = async (ids: string[]): Promise<ProductResponseDT
 
   if (missingIds.length === 0) return results;
 
-  // 2. Query DB in a single batch with IN clause
+  // 2. Query DB in a single fast round-trip with PostgreSQL JSON aggregation
   try {
-    const dbProducts = await prisma.products.findMany({
-      where: {
-        OR: [
-          { id: { in: missingIds } },
-          { slug: { in: missingIds } },
-        ],
-      },
-      include: {
-        categories: true,
-        product_images: { orderBy: { sortOrder: 'asc' } },
-        product_variants: true,
-        product_reviews: {
-          where: { isApproved: true, isVerifiedPurchase: true },
-          select: { rating: true },
+    let dbProducts: any[] = [];
+    try {
+      dbProducts = await prisma.$queryRaw<any[]>`
+        SELECT p.*, to_jsonb(c) AS categories,
+          COALESCE((SELECT jsonb_agg(to_jsonb(i) ORDER BY i."sortOrder")
+            FROM product_images i WHERE i."productId" = p.id), '[]'::jsonb) AS product_images,
+          COALESCE((SELECT jsonb_agg(to_jsonb(v))
+            FROM product_variants v WHERE v."productId" = p.id), '[]'::jsonb) AS product_variants,
+          COALESCE((SELECT jsonb_agg(to_jsonb(o) || jsonb_build_object(
+              'product_option_values', COALESCE((
+                SELECT jsonb_agg(to_jsonb(ov) ORDER BY ov."sortOrder")
+                FROM product_option_values ov WHERE ov."optionId" = o.id
+              ), '[]'::jsonb)))
+            FROM product_options o WHERE o."productId" = p.id), '[]'::jsonb) AS product_options
+        FROM products p
+        LEFT JOIN categories c ON c.id = p."categoryId"
+        WHERE p.id = ANY(${missingIds}::text[]) OR p.slug = ANY(${missingIds}::text[])
+      `;
+    } catch (rawErr: any) {
+      console.warn('Fast batch queryRaw failed, falling back to findMany:', rawErr?.message);
+      dbProducts = await prisma.products.findMany({
+        where: {
+          OR: [
+            { id: { in: missingIds } },
+            { slug: { in: missingIds } },
+          ],
         },
-        product_options: {
-          include: {
-            product_option_values: { orderBy: { sortOrder: 'asc' } },
+        include: {
+          categories: true,
+          product_images: { orderBy: { sortOrder: 'asc' } },
+          product_variants: true,
+          product_options: {
+            include: {
+              product_option_values: { orderBy: { sortOrder: 'asc' } },
+            },
           },
         },
-      },
-    });
+      });
+    }
 
     const foundMap = new Map<string, ProductResponseDTO>();
     for (const p of dbProducts) {
@@ -1082,115 +1166,161 @@ export const updateProduct = async (id: string, data: UpdateProductDTO): Promise
     }
   }
 
-  const updated = await prisma.$transaction(async (transaction) => {
-    const product = await transaction.products.update({
-      where: { id },
-      data: {
-        ...(data.name !== undefined && { name: data.name }),
-        ...(finalSlug && { slug: finalSlug }),
-        ...(data.shortDescription !== undefined && { shortDescription: data.shortDescription }),
-        ...(data.description !== undefined && { description: data.description }),
-        ...(data.price !== undefined && { price: data.price }),
-        ...(data.compareAtPrice !== undefined && { compareAtPrice: data.compareAtPrice }),
-        ...(data.imageUrl !== undefined && { imageUrl: data.imageUrl }),
-        ...(data.categoryId !== undefined && { categoryId: data.categoryId }),
-        ...(data.surpriseType !== undefined && { surpriseType: data.surpriseType }),
-        ...(data.surpriseValue !== undefined && { surpriseValue: data.surpriseValue }),
-        ...(data.badge !== undefined && { badge: data.badge }),
-        ...(data.stock !== undefined && { stock: data.stock }),
-        ...(data.lowStockThreshold !== undefined && { lowStockThreshold: data.lowStockThreshold }),
-        ...(data.sku !== undefined && { sku: data.sku }),
-        ...(data.isBestSeller !== undefined && { isBestSeller: data.isBestSeller }),
-        ...(data.isNew !== undefined && { isNew: data.isNew }),
-        ...(data.status !== undefined && { status: data.status }),
-        ...(data.scentNotes !== undefined && { scentNotes: data.scentNotes }),
-        ...(data.ringSizes !== undefined && { ringSizes: data.ringSizes }),
-        ...(data.jewelryTypes !== undefined && { jewelryTypes: data.jewelryTypes }),
-        updatedAt: new Date(),
-      },
-    });
+  await prisma.$transaction(
+    async (transaction) => {
+      let categoryId = data.categoryId;
+      if (data.categorySlug !== undefined) {
+        if (data.categorySlug === null || data.categorySlug.trim() === '') {
+          categoryId = null;
+        } else {
+          const cleanSlug = data.categorySlug.trim().toLowerCase();
+          const collection = await transaction.collections.findFirst({
+            where: { slug: cleanSlug },
+            select: { name: true },
+          });
 
-    if (data.images !== undefined) {
-      await transaction.product_images.deleteMany({ where: { productId: id } });
-      if (data.images.length > 0) {
-        await transaction.product_images.createMany({
-          data: data.images.map((url, sortOrder) => ({
-            id: randomUUID(),
-            productId: id,
-            url,
-            sortOrder,
-            isPrimary: sortOrder === 0,
-          })),
-        });
+          const categoryName =
+            collection?.name ||
+            cleanSlug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+
+          const category = await transaction.categories.upsert({
+            where: { slug: cleanSlug },
+            update: { name: categoryName, updatedAt: new Date() },
+            create: {
+              id: randomUUID(),
+              slug: cleanSlug,
+              name: categoryName,
+              updatedAt: new Date(),
+            },
+            select: { id: true },
+          });
+          categoryId = category.id;
+        }
       }
-    }
 
-    if (data.options !== undefined) {
-      await transaction.product_options.deleteMany({ where: { productId: id } });
-      for (const option of data.options) {
-        await transaction.product_options.create({
-          data: {
-            id: randomUUID(),
-            productId: id,
-            name: option.name,
-            product_option_values: {
-              create: option.values.map((value, sortOrder) => ({
-                id: randomUUID(),
-                value,
-                sortOrder,
-              })),
+      await transaction.products.update({
+        where: { id },
+        data: {
+          ...(data.name !== undefined && { name: data.name }),
+          ...(finalSlug && { slug: finalSlug }),
+          ...(data.shortDescription !== undefined && { shortDescription: data.shortDescription }),
+          ...(data.description !== undefined && { description: data.description }),
+          ...(data.price !== undefined && { price: data.price }),
+          ...(data.compareAtPrice !== undefined && { compareAtPrice: data.compareAtPrice }),
+          ...(data.imageUrl !== undefined && { imageUrl: data.imageUrl }),
+          ...(categoryId !== undefined && { categoryId }),
+          ...(data.surpriseType !== undefined && { surpriseType: data.surpriseType }),
+          ...(data.surpriseValue !== undefined && { surpriseValue: data.surpriseValue }),
+          ...(data.badge !== undefined && { badge: data.badge }),
+          ...(data.stock !== undefined && { stock: data.stock }),
+          ...(data.lowStockThreshold !== undefined && { lowStockThreshold: data.lowStockThreshold }),
+          ...(data.sku !== undefined && { sku: data.sku }),
+          ...(data.isBestSeller !== undefined && { isBestSeller: data.isBestSeller }),
+          ...(data.isNew !== undefined && { isNew: data.isNew }),
+          ...(data.status !== undefined && { status: data.status }),
+          ...(data.scentNotes !== undefined && { scentNotes: data.scentNotes }),
+          ...(data.ringSizes !== undefined && { ringSizes: data.ringSizes }),
+          ...(data.jewelryTypes !== undefined && { jewelryTypes: data.jewelryTypes }),
+          updatedAt: new Date(),
+        },
+      });
+
+      if (data.images !== undefined) {
+        await transaction.product_images.deleteMany({ where: { productId: id } });
+        if (data.images.length > 0) {
+          await transaction.product_images.createMany({
+            data: data.images.map((url, sortOrder) => ({
+              id: randomUUID(),
+              productId: id,
+              url,
+              sortOrder,
+              isPrimary: sortOrder === 0,
+            })),
+          });
+        }
+      }
+
+      if (data.options !== undefined) {
+        await transaction.product_options.deleteMany({ where: { productId: id } });
+        for (const option of data.options) {
+          await transaction.product_options.create({
+            data: {
+              id: randomUUID(),
+              productId: id,
+              name: option.name,
+              product_option_values: {
+                create: option.values.map((value, sortOrder) => ({
+                  id: randomUUID(),
+                  value,
+                  sortOrder,
+                })),
+              },
+            },
+          });
+        }
+      }
+
+      if (data.collectionSlug && data.collectionSlug.trim()) {
+        const cleanColSlug = data.collectionSlug.trim().toLowerCase();
+        let collection = await transaction.collections.findFirst({
+          where: { slug: cleanColSlug },
+          select: { id: true },
+        });
+        if (!collection) {
+          const collectionName = cleanColSlug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+          collection = await transaction.collections.create({
+            data: {
+              id: randomUUID(),
+              name: collectionName,
+              slug: cleanColSlug,
+              updatedAt: new Date(),
+            },
+            select: { id: true },
+          });
+        }
+
+        await transaction.product_collections.upsert({
+          where: {
+            productId_collectionId: {
+              productId: id,
+              collectionId: collection.id,
             },
           },
+          update: { sortOrder: 0 },
+          create: { productId: id, collectionId: collection.id, sortOrder: 0 },
+        });
+        await transaction.product_collections.updateMany({
+          where: {
+            productId: id,
+            collectionId: { not: collection.id },
+            sortOrder: 0,
+          },
+          data: { sortOrder: 1 },
         });
       }
+    },
+    {
+      maxWait: 15000,
+      timeout: 30000,
     }
+  );
 
-    if (data.collectionSlug) {
-      const collection = await transaction.collections.findFirst({
-        where: { slug: data.collectionSlug },
-        select: { id: true },
-      });
-      if (!collection) {
-        throw new Error(`Collection "${data.collectionSlug}" was not found.`);
-      }
-
-      await transaction.product_collections.upsert({
-        where: {
-          productId_collectionId: {
-            productId: id,
-            collectionId: collection.id,
-          },
-        },
-        update: { sortOrder: 0 },
-        create: { productId: id, collectionId: collection.id, sortOrder: 0 },
-      });
-      await transaction.product_collections.updateMany({
-        where: {
-          productId: id,
-          collectionId: { not: collection.id },
-          sortOrder: 0,
-        },
-        data: { sortOrder: 1 },
-      });
-    }
-
-    return transaction.products.findUniqueOrThrow({
-      where: { id: product.id },
-      include: {
-        categories: true,
-        product_images: { orderBy: { sortOrder: 'asc' } },
-        product_variants: true,
-        product_options: {
-          include: {
-            product_option_values: { orderBy: { sortOrder: 'asc' } },
-          },
-        },
-        product_collections: {
-          orderBy: { sortOrder: 'asc' },
-          include: { collections: { select: { id: true, name: true, slug: true } } },
+  const updated = await prisma.products.findUniqueOrThrow({
+    where: { id },
+    include: {
+      categories: true,
+      product_images: { orderBy: { sortOrder: 'asc' } },
+      product_variants: true,
+      product_options: {
+        include: {
+          product_option_values: { orderBy: { sortOrder: 'asc' } },
         },
       },
-    });
+      product_collections: {
+        orderBy: { sortOrder: 'asc' },
+        include: { collections: { select: { id: true, name: true, slug: true } } },
+      },
+    },
   });
 
   invalidateProductCaches();

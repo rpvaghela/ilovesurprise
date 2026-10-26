@@ -183,6 +183,7 @@ export const storefrontKeys = {
  */
 export async function invalidateProductCaches(): Promise<void> {
   await queryClient.invalidateQueries({ queryKey: productKeys.all });
+  await queryClient.refetchQueries({ queryKey: productKeys.all, type: 'active' });
 }
 
 /** Invalidates homepage/storefront content after an admin content save. */

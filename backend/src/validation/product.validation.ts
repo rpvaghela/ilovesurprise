@@ -59,6 +59,7 @@ export const updateProductSchema = z.object({
     compareAtPrice: z.number().positive().nullable().optional(),
     imageUrl: z.string().url().nullable().optional(),
     categoryId: z.string().nullable().optional(),
+    categorySlug: z.string().trim().min(1).nullable().optional(),
     surpriseType: z.string().nullable().optional(),
     surpriseValue: z.number().nonnegative().nullable().optional(),
     badge: z.string().nullable().optional(),

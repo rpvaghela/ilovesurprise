@@ -546,6 +546,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const handleEditProduct = async (id: string, updates: Partial<AdminProductItem>) => {
     await adminService.updateProduct(id, updates);
+    setProducts((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, ...updates } : p))
+    );
     await refreshProducts();
     onShowToast('Product updated successfully', { type: 'success' });
   };

@@ -249,6 +249,7 @@ describe('adminService', () => {
         compareAtPrice: null,
         surpriseType: 'cash',
         surpriseValue: 125,
+        categorySlug: 'cash-candles',
         slug: 'updated-candle',
         collectionSlug: 'cash-candles',
         options: [{ name: 'Scent', values: ['Vanilla', 'Citrus'] }],
@@ -1396,4 +1397,3 @@ describe('adminService VIP memberships & jewelry appraisals', () => {
     });
   });
 });
-

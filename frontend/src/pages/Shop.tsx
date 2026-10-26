@@ -160,7 +160,7 @@ export const Shop: React.FC<ShopProps> = ({
   }
   const [isRetrying, setIsRetrying] = useState<boolean>(false);
 
-  // Responsive limit: 15 on Laptop/Desktop (3 complete rows of 5), 16 on Mobile/Tablet (8 complete rows of 2)
+  // Responsive limit: 8 on Laptop/Desktop (2 complete rows of 4), 6 on Mobile/Tablet (3 complete rows of 2)
   const [isDesktop, setIsDesktop] = useState<boolean>(() => {
     return typeof window !== 'undefined' ? window.innerWidth >= 1024 : true;
   });
@@ -174,7 +174,7 @@ export const Shop: React.FC<ShopProps> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  const pageLimit = isDesktop ? 15 : 16;
+  const pageLimit = isDesktop ? 8 : 6;
 
   const sortParam =
     appliedFilters.sortBy === 'price-asc'
@@ -229,11 +229,11 @@ export const Shop: React.FC<ShopProps> = ({
     if (appliedFilters.maxPrice !== null) {
       prods = prods.filter((p) => Number(p.price) <= Number(appliedFilters.maxPrice));
     }
-    if (isDesktop && prods.length > 15) {
-      return prods.slice(0, 15);
+    if (prods.length > pageLimit) {
+      return prods.slice(0, pageLimit);
     }
     return prods;
-  }, [queryProducts, isDesktop, appliedFilters.minPrice, appliedFilters.maxPrice]);
+  }, [queryProducts, pageLimit, appliedFilters.minPrice, appliedFilters.maxPrice]);
 
   // Synchronize search query, filter state, sorting, and page with URL query parameters
   useEffect(() => {
@@ -306,6 +306,7 @@ export const Shop: React.FC<ShopProps> = ({
   const handleSortChange = (newSort: FilterState['sortBy']) => {
     setAppliedFilters((prev) => ({ ...prev, sortBy: newSort }));
     setDraftFilters((prev) => ({ ...prev, sortBy: newSort }));
+    setCurrentPage(1);
   };
 
   const activeFiltersCount =

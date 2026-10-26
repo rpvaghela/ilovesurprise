@@ -308,7 +308,7 @@ export const APPROVED_COLLECTIONS_MAP: Record<string, ApprovedCollectionMeta> = 
       "jewellery-candles",
       "jewellery-candle"
     ],
-    "category": "Candles",
+    "category": "Jewelry Candles",
     "referenceCount": 100,
     "actualCount": 100,
     "title": "Jewelry Candles",

@@ -94,7 +94,7 @@ export const CollectionPage: React.FC<CollectionPageProps> = ({
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // Responsive limit: 15 on Laptop/Desktop (3 complete rows of 5), 16 on Mobile/Tablet (8 complete rows of 2)
+  // Responsive limit: 8 on Laptop/Desktop (2 complete rows of 4), 6 on Mobile/Tablet (3 complete rows of 2)
   const [isDesktop, setIsDesktop] = useState<boolean>(() => {
     return typeof window !== 'undefined' ? window.innerWidth >= 1024 : true;
   });
@@ -108,7 +108,7 @@ export const CollectionPage: React.FC<CollectionPageProps> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  const pageLimit = isDesktop ? 15 : 16;
+  const pageLimit = isDesktop ? 8 : 6;
 
   // TanStack Query powered collection loading: instant (0ms) from cache, background refresh, zero lag
   const {
@@ -387,6 +387,7 @@ export const CollectionPage: React.FC<CollectionPageProps> = ({
               key={`${product.id || product.slug || product.name}-${index}`}
               product={product}
               cartQuantity={cartQuantityMap.get(product.id) || 0}
+              priority={index < 4}
               onAddToCart={onAddToCart}
               onUpdateQuantity={onUpdateQuantity}
               onToggleWishlist={(productId) => {

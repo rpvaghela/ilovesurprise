@@ -132,7 +132,9 @@ export interface CreateProductDTO {
   options?: Array<{ name: string; values: string[] }>;
 }
 
-export interface UpdateProductDTO extends Partial<CreateProductDTO> {}
+export interface UpdateProductDTO extends Partial<CreateProductDTO> {
+  categorySlug?: string | null;
+}
 
 export interface CreateReviewDTO {
   rating: number;

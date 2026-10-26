@@ -160,6 +160,7 @@ export const ProductGrid: React.FC<ProductGridProps> = React.memo(({
             <ProductCard
               product={product}
               cartQuantity={qty}
+              priority={index < 4}
               onAddToCart={onAddToCart}
               onUpdateQuantity={onUpdateQuantity}
               onToggleWishlist={handleToggle}
