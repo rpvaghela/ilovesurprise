@@ -1106,17 +1106,6 @@ export const productService = {
     const limit = params.limit || (typeof window !== 'undefined' && window.innerWidth >= 1024 ? 8 : 6);
     const cleanHandle = decodeURIComponent(handleOrId).toLowerCase().trim();
 
-    // 1. Check if we already have a cached result in memory or session
-    const cached = this.getCachedCollectionResult(cleanHandle, params);
-    if (cached && cached.collection && cached.products && cached.products.length > 0) {
-      return {
-        collection: cached.collection,
-        products: cached.products,
-        total: cached.total,
-        page: cached.page,
-        totalPages: cached.totalPages,
-      };
-    }
 
     // 2. Check approved collection meta or categoriesData
     const meta = getApprovedCollectionMeta(cleanHandle);
@@ -1141,6 +1130,27 @@ export const productService = {
       productsCount: meta?.actualCount || category?.itemCount || 24,
       imageUrl: fallbackImg,
     };
+
+    const isSoap = cleanHandle === 'soap' || cleanHandle === 'soaps' || meta?.canonicalHandle === 'money-soaps';
+    if (isSoap && SOAP_CATALOG_PRODUCTS.length > 0) {
+      const total = SOAP_CATALOG_PRODUCTS.length;
+      const skip = (page - 1) * limit;
+      const pageProducts = SOAP_CATALOG_PRODUCTS.slice(skip, skip + limit).map((p) => ({
+        ...p,
+        category: 'Soaps',
+      }));
+      return {
+        collection: {
+          ...colObj,
+          title: 'Soaps',
+          productsCount: total,
+        },
+        products: pageProducts,
+        total,
+        page,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      };
+    }
 
     let products: Product[] = [];
 
@@ -2362,20 +2372,6 @@ export const productService = {
           page,
           totalPages,
         };
-      }
-    }
-
-    // Check if it's a known category from categoriesData or unified catalog
-    const category = categoriesData.find(
-      (c) =>
-        c.slug.toLowerCase() === clean ||
-        c.id.toLowerCase() === clean ||
-        c.name.toLowerCase() === clean
-    );
-    if (category) {
-      const placeholder = this.getCollectionPlaceholder(clean, params);
-      if (placeholder && placeholder.products && placeholder.products.length > 0) {
-        return placeholder;
       }
     }
 
