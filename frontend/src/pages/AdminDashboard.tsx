@@ -174,98 +174,155 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     []
   );
 
-  /**
-   * Loads every backend-backed admin section.
-   *
-   * Each section settles independently: one failing endpoint (for example a
-   * 403 on the admin user list) must not blank out the panels that did load.
-   */
-  const loadServerData = React.useCallback(
-    async (signal?: AbortSignal, timeframe: ReportTimeframe = '30d') => {
-      const run = async (
-        key: AdminSectionKey,
-        task: () => Promise<void>
-      ): Promise<void> => {
-        // Only mark section as 'loading' during cold initial mount; background refresh updates data in place
-        setSectionStatus((prev) => (prev[key] === 'ready' ? prev : { ...prev, [key]: 'loading' }));
-        try {
-          await task();
-          if (!signal?.aborted) markSection(key, 'ready');
-        } catch (err: any) {
-          if (
-            signal?.aborted ||
-            err?.kind === 'aborted' ||
-            err?.name === 'AbortError' ||
-            String(err?.message || '').toLowerCase().includes('cancel')
-          ) {
-            // Cancelled or aborted requests should never show an error state to the user
-            markSection(key, 'ready');
-            return;
+  // Mapping of which sections are strictly needed per tab
+  const TAB_SECTIONS_MAP = React.useMemo<Record<AdminTab, AdminSectionKey[]>>(() => ({
+    overview: ['kpis', 'orders', 'reports'],
+    orders: ['orders'],
+    products: ['products'],
+    collections: ['products'],
+    customers: ['customers', 'orders'],
+    representatives: ['representatives', 'memberships'],
+    memberships: ['memberships', 'representatives'],
+    commissions: ['commissions'],
+    reports: ['reports', 'kpis'],
+    commerce: ['products', 'customers', 'orders'],
+    content: [],
+    settings: ['settings'],
+    permissions: [],
+    appraisals: [],
+  }), []);
+
+  const loadedSectionsRef = React.useRef<Set<AdminSectionKey>>(new Set());
+
+  const executeSectionTask = React.useCallback(
+    async (
+      key: AdminSectionKey,
+      signal?: AbortSignal,
+      tf: ReportTimeframe = '30d'
+    ) => {
+      setSectionStatus((prev) => (prev[key] === 'ready' ? prev : { ...prev, [key]: 'loading' }));
+      try {
+        switch (key) {
+          case 'products': {
+            const live = await adminService.fetchCommerceProducts({ signal });
+            if (!signal?.aborted) {
+              setProducts(live);
+              setTotalProductCount(adminService.getCommerceProductsTotal());
+            }
+            break;
           }
-          // Preserve currently loaded data during background refreshes
+          case 'customers': {
+            const live = await adminService.fetchCustomers({ signal });
+            if (!signal?.aborted) setCustomers(live);
+            break;
+          }
+          case 'representatives': {
+            const live = await adminService.fetchRepresentatives({ signal });
+            if (!signal?.aborted) setRepresentatives(live);
+            break;
+          }
+          case 'commissions': {
+            const live = await adminService.fetchCommissions({ signal });
+            if (!signal?.aborted) setCommissions(live);
+            break;
+          }
+          case 'kpis': {
+            const live = await adminService.fetchKPIs(tf, { signal });
+            if (!signal?.aborted) setKpis(live);
+            break;
+          }
+          case 'reports': {
+            const live = await adminService.fetchReportsData(tf, { signal });
+            if (!signal?.aborted) setReportData(live);
+            break;
+          }
+          case 'orders': {
+            const live = await adminService.fetchCommerceOrders({ signal });
+            if (!signal?.aborted) setOrders(live);
+            break;
+          }
+          case 'memberships': {
+            const live = await adminService.fetchMemberships(undefined, { signal });
+            if (!signal?.aborted && live?.memberships) setMemberships(live.memberships);
+            break;
+          }
+          case 'settings': {
+            const live = await adminService.fetchSettings({ signal });
+            if (!signal?.aborted) setSettings(live);
+            break;
+          }
+        }
+        if (!signal?.aborted) {
+          loadedSectionsRef.current.add(key);
           markSection(key, 'ready');
         }
-      };
-
-      await Promise.allSettled([
-        run('products', async () => {
-          const live = await adminService.fetchCommerceProducts({ signal });
-          if (!signal?.aborted) {
-            setProducts(live);
-            setTotalProductCount(adminService.getCommerceProductsTotal());
-          }
-        }),
-        run('customers', async () => {
-          const live = await adminService.fetchCustomers({ signal });
-          if (!signal?.aborted) setCustomers(live);
-        }),
-        run('representatives', async () => {
-          const live = await adminService.fetchRepresentatives({ signal });
-          if (!signal?.aborted) setRepresentatives(live);
-        }),
-        run('commissions', async () => {
-          const live = await adminService.fetchCommissions({ signal });
-          if (!signal?.aborted) setCommissions(live);
-        }),
-        run('kpis', async () => {
-          const live = await adminService.fetchKPIs(timeframe, { signal });
-          if (!signal?.aborted) setKpis(live);
-        }),
-        run('reports', async () => {
-          const live = await adminService.fetchReportsData(timeframe, { signal });
-          if (!signal?.aborted) setReportData(live);
-        }),
-        run('orders', async () => {
-          const live = await adminService.fetchCommerceOrders({ signal });
-          if (!signal?.aborted) setOrders(live);
-        }),
-        run('memberships', async () => {
-          const live = await adminService.fetchMemberships(undefined, { signal });
-          if (!signal?.aborted && live?.memberships) setMemberships(live.memberships);
-        }),
-        run('settings', async () => {
-          const live = await adminService.fetchSettings({ signal });
-          if (!signal?.aborted) setSettings(live);
-        }),
-        (async () => {
-          try {
-            const liveCols = await adminService.fetchCollections({ signal });
-            if (!signal?.aborted && liveCols && liveCols.length > 0) {
-              setCollections(liveCols);
-            }
-          } catch {}
-        })(),
-      ]);
+      } catch (err: any) {
+        if (
+          signal?.aborted ||
+          err?.kind === 'aborted' ||
+          err?.name === 'AbortError' ||
+          String(err?.message || '').toLowerCase().includes('cancel')
+        ) {
+          markSection(key, 'ready');
+          return;
+        }
+        markSection(key, 'ready');
+      }
     },
     [markSection]
+  );
+
+  /**
+   * Loads sections prioritized by the currently active tab first for instantaneous responsiveness.
+   * Background sections are then loaded non-blockingly.
+   */
+  const loadServerData = React.useCallback(
+    async (
+      signal?: AbortSignal,
+      timeframe: ReportTimeframe = '30d',
+      targetSections?: AdminSectionKey[]
+    ) => {
+      const activeSections = targetSections || TAB_SECTIONS_MAP[activeTab] || ['kpis', 'orders'];
+
+      // 1. Load active sections immediately in parallel
+      await Promise.allSettled(
+        activeSections.map((sec) => executeSectionTask(sec, signal, timeframe))
+      );
+
+      // Non-blocking collection fetch
+      (async () => {
+        try {
+          const liveCols = await adminService.fetchCollections({ signal });
+          if (!signal?.aborted && liveCols && liveCols.length > 0) {
+            setCollections(liveCols);
+          }
+        } catch {}
+      })();
+
+      // 2. Lazily preload remaining sections in background if full load
+      if (!targetSections) {
+        const remaining: AdminSectionKey[] = (
+          ['kpis', 'orders', 'products', 'customers', 'representatives', 'commissions', 'reports', 'memberships', 'settings'] as AdminSectionKey[]
+        ).filter((sec) => !activeSections.includes(sec) && !loadedSectionsRef.current.has(sec));
+
+        if (remaining.length > 0) {
+          setTimeout(() => {
+            if (signal?.aborted) return;
+            const chunk = remaining.slice(0, 3);
+            Promise.allSettled(chunk.map((sec) => executeSectionTask(sec, signal, timeframe)));
+          }, 250);
+        }
+      }
+    },
+    [TAB_SECTIONS_MAP, activeTab, executeSectionTask]
   );
 
   useEffect(() => {
     touchAdminActivity();
     const controller = new AbortController();
-    loadServerData(controller.signal);
+    loadServerData(controller.signal, reportTimeframe);
     return () => {
-      // Do not abort on unmount to avoid transient cancellation errors across views
+      controller.abort();
     };
   }, []);
 
@@ -282,29 +339,35 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [initialTab, activeTab]);
 
   /**
-   * Refresh after a mutation. Server-owned sections are refetched; the
-   * remaining local-only sections (memberships, refunds, discounts, settings,
-   * collections) are re-read from their local store.
+   * Debounced refresh after mutations. Only refreshes active tab sections.
    */
   useEffect(() => {
+    let timer: any;
+
     const handleUpdate = () => {
-      setCurrentRole(adminService.getCurrentRole());
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        setCurrentRole(adminService.getCurrentRole());
 
-      // Local-only admin surfaces with no backend endpoint.
-      setMemberships(adminService.getMemberships());
-      setCollections(adminService.getCollections());
-      setRefunds(adminService.getRefunds());
-      setDiscounts(adminService.getDiscounts());
-      setSettings(adminService.getSettings());
+        // Local-only admin surfaces
+        setMemberships(adminService.getMemberships());
+        setCollections(adminService.getCollections());
+        setRefunds(adminService.getRefunds());
+        setDiscounts(adminService.getDiscounts());
+        setSettings(adminService.getSettings());
 
-      loadServerData();
+        // Refresh ONLY current tab sections to avoid full dashboard freeze
+        const currentSections = TAB_SECTIONS_MAP[activeTab] || ['kpis', 'orders'];
+        loadServerData(undefined, reportTimeframe, currentSections);
+      }, 250);
     };
 
     window.addEventListener('ils_admin_updated', handleUpdate);
     return () => {
+      clearTimeout(timer);
       window.removeEventListener('ils_admin_updated', handleUpdate);
     };
-  }, [loadServerData]);
+  }, [TAB_SECTIONS_MAP, activeTab, loadServerData, reportTimeframe]);
 
   const handleTabSelect = (tab: AdminTab) => {
     touchAdminActivity();
@@ -316,6 +379,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     // Update browser URL query if possible without full page reload
     if (typeof window !== 'undefined' && window.history?.pushState) {
       window.history.pushState({ view: 'admin', tab: resolvedTab }, '', resolvedTab === 'overview' ? '/admin' : `/admin?tab=${resolvedTab}`);
+    }
+
+    // Immediately fetch any sections required by this tab that have not loaded yet
+    const needed = (TAB_SECTIONS_MAP[resolvedTab] || []).filter(
+      (sec) => !loadedSectionsRef.current.has(sec)
+    );
+    if (needed.length > 0) {
+      loadServerData(undefined, reportTimeframe, needed);
     }
   };
 

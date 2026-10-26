@@ -206,6 +206,16 @@ export const analyticsService = {
   toBackendTimeframe,
   toUiTimeframe,
 
+  _reportInFlight: new Map<string, Promise<AnalyticsReport>>(),
+  _reportCache: new Map<string, { data: AnalyticsReport; timestamp: number }>(),
+  _centralInFlight: null as Promise<CommissionCentralSummary> | null,
+  _centralCache: null as { data: CommissionCentralSummary; timestamp: number } | null,
+
+  clearCache() {
+    this._reportCache.clear();
+    this._centralCache = null;
+  },
+
   /**
    * Fetches the authoritative analytics report. Errors propagate so the UI can
    * show a real error state with a retry rather than zeroed-out metrics that
@@ -215,27 +225,67 @@ export const analyticsService = {
     timeframe: UiTimeframe | BackendTimeframe = '30d',
     options?: { signal?: AbortSignal }
   ): Promise<AnalyticsReport> {
-    const response = await apiClient.get<ApiResponse<AnalyticsReport>>(
-      '/api/admin/reports/analytics',
-      { timeframe: toBackendTimeframe(timeframe) },
-      { signal: options?.signal }
-    );
-    return unwrap<AnalyticsReport>(response, '/api/admin/reports/analytics');
+    const key = toBackendTimeframe(timeframe);
+    const cached = this._reportCache.get(key);
+    if (cached && Date.now() - cached.timestamp < 30_000) {
+      return cached.data;
+    }
+
+    if (this._reportInFlight.has(key)) {
+      return this._reportInFlight.get(key)!;
+    }
+
+    const promise = (async () => {
+      try {
+        const response = await apiClient.get<ApiResponse<AnalyticsReport>>(
+          '/api/admin/reports/analytics',
+          { timeframe: key },
+          { signal: options?.signal }
+        );
+        const data = unwrap<AnalyticsReport>(response, '/api/admin/reports/analytics');
+        this._reportCache.set(key, { data, timestamp: Date.now() });
+        return data;
+      } finally {
+        this._reportInFlight.delete(key);
+      }
+    })();
+
+    this._reportInFlight.set(key, promise);
+    return promise;
   },
 
   /** Program-wide commission totals and the published tier schedule. */
   async fetchCommissionCentral(options?: {
     signal?: AbortSignal;
   }): Promise<CommissionCentralSummary> {
-    const response = await apiClient.get<ApiResponse<CommissionCentralSummary>>(
-      '/api/admin/commission/central',
-      undefined,
-      { signal: options?.signal }
-    );
-    return unwrap<CommissionCentralSummary>(
-      response,
-      '/api/admin/commission/central'
-    );
+    if (this._centralCache && Date.now() - this._centralCache.timestamp < 30_000) {
+      return this._centralCache.data;
+    }
+
+    if (this._centralInFlight) {
+      return this._centralInFlight;
+    }
+
+    const promise = (async () => {
+      try {
+        const response = await apiClient.get<ApiResponse<CommissionCentralSummary>>(
+          '/api/admin/commission/central',
+          undefined,
+          { signal: options?.signal }
+        );
+        const data = unwrap<CommissionCentralSummary>(
+          response,
+          '/api/admin/commission/central'
+        );
+        this._centralCache = { data, timestamp: Date.now() };
+        return data;
+      } finally {
+        this._centralInFlight = null;
+      }
+    })();
+
+    this._centralInFlight = promise;
+    return promise;
   },
 
   /**

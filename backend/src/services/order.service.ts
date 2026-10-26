@@ -21,6 +21,7 @@ import {
   UpdateOrderStatusDTO,
 } from '../types/order.types';
 import { processOrderCommission, processOrderRefundCommission } from './commission.service';
+import { invalidateAnalyticsCache } from './analytics.service';
 import { refundStripePayment } from './payment.service';
 
 export class OrderServiceError extends Error {
@@ -431,6 +432,8 @@ export const updateOrderStatus = async (
       console.error(`[order.service] Failed to process commission for order ${order.id}:`, err?.message || err);
     });
   }
+
+  invalidateAnalyticsCache();
 
   return getOrderById(order.id);
 };

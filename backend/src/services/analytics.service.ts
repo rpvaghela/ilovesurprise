@@ -46,9 +46,26 @@ export function formatCurrency(amount: number): string {
   }).format(amount);
 }
 
+interface CacheEntry<T> {
+  data: T;
+  expiresAt: number;
+}
+const reportCache = new Map<string, CacheEntry<AnalyticsReportDTO>>();
+let centralCache: CacheEntry<CommissionCentralSummaryDTO> | null = null;
+
+export function invalidateAnalyticsCache(): void {
+  reportCache.clear();
+  centralCache = null;
+}
+
 export async function getAnalyticsReport(
   timeframe: AnalyticsTimeframe = '7D'
 ): Promise<AnalyticsReportDTO> {
+  const cached = reportCache.get(timeframe);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.data;
+  }
+
   const startDate = getStartDateForTimeframe(timeframe);
   const endDate = new Date();
 
@@ -253,7 +270,7 @@ export async function getAnalyticsReport(
     prisma.affiliate_profiles.count({ where: { isActive: true } }),
   ]);
 
-  return {
+  const reportResult: AnalyticsReportDTO = {
     timeframe,
     dateRange: {
       startDate: startDate.toISOString().split('T')[0],
@@ -315,9 +332,16 @@ export async function getAnalyticsReport(
       topAffiliates: topAffiliatesCount,
     },
   };
+
+  reportCache.set(timeframe, { data: reportResult, expiresAt: Date.now() + 60_000 });
+  return reportResult;
 }
 
 export async function getCommissionCentralOverview(): Promise<CommissionCentralSummaryDTO> {
+  if (centralCache && Date.now() < centralCache.expiresAt) {
+    return centralCache.data;
+  }
+
   const [allCommissions, activeConsultantsCount] = await Promise.all([
     prisma.commission_ledger.findMany({
       select: { amountUsd: true, status: true, reversals: { select: { amountUsd: true } } },
@@ -351,7 +375,7 @@ export async function getCommissionCentralOverview(): Promise<CommissionCentralS
     roleDescription: t.roleDescription,
   }));
 
-  return {
+  const centralResult = {
     programRules: {
       maxDistributionCapPercent: 35.0,
       payoutSchedule: 'Monthly Payouts: 15th of every month',
@@ -370,6 +394,9 @@ export async function getCommissionCentralOverview(): Promise<CommissionCentralS
       activeConsultantsCount,
     },
   };
+
+  centralCache = { data: centralResult, expiresAt: Date.now() + 60_000 };
+  return centralResult;
 }
 
 export async function getAdminCommissionLedger(query: {
