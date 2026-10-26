@@ -17,25 +17,26 @@ jobs:
           SSH_HOST: ${{ secrets.VPS_HOST }}
           SSH_USER: ${{ secrets.VPS_USER }}
           SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          SSH_PASSWORD: ${{ secrets.VPS_PASSWORD }}
         run: |
           MISSING=0
           if [ -z "$SSH_HOST" ]; then
-            echo "::error::Secret VPS_HOST is missing or empty. Configure VPS_HOST in GitHub repository secrets."
+            echo "::error::Secret VPS_HOST is missing or empty."
             MISSING=1
           fi
           if [ -z "$SSH_USER" ]; then
-            echo "::error::Secret VPS_USER is missing or empty. Configure VPS_USER in GitHub repository secrets."
+            echo "::error::Secret VPS_USER is missing or empty."
             MISSING=1
           fi
-          if [ -z "$SSH_KEY" ]; then
-            echo "::error::Secret VPS_SSH_KEY is missing or empty. Configure VPS_SSH_KEY in GitHub repository secrets."
+          if [ -z "$SSH_KEY" ] && [ -z "$SSH_PASSWORD" ]; then
+            echo "::error::Neither VPS_SSH_KEY nor VPS_PASSWORD is configured. Provide at least one."
             MISSING=1
           fi
           if [ "$MISSING" -eq 1 ]; then
-            echo "Deployment preflight validation failed: one or more required secrets are missing."
+            echo "Deployment preflight validation failed."
             exit 1
           fi
-          echo "All required deployment secrets are configured."
+          echo "All required deployment credentials are configured."
 
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.2.0
@@ -43,6 +44,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          password: ${{ secrets.VPS_PASSWORD }}
           port: ${{ secrets.VPS_PORT || 22 }}
           script: |
             set -e
