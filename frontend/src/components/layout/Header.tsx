@@ -1206,7 +1206,7 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       {/* 2. Flying / Floating Main Brand & Navigation Header Bar */}
-      <header className={`sticky top-0 z-40 w-full max-w-full pointer-events-none pt-2 sm:pt-2.5 pb-2.5 sm:pb-3 px-2 sm:px-4 lg:px-6 transition-all duration-300 ${isScrolled ? '' : 'bg-[#FCF2F4]'
+      <header className={`sticky top-0 z-40 w-full max-w-full pointer-events-none pt-2 sm:pt-2.5 pb-2.5 sm:pb-3 px-2 sm:px-3 lg:px-4 2xl:px-6 transition-all duration-300 ${isScrolled ? '' : 'bg-[#FCF2F4]'
         }`}>
         {/* Top Edge Blur Strip: blurs content in the top gap above the navbar while scrolling */}
         <div
@@ -1220,7 +1220,7 @@ export const Header: React.FC<HeaderProps> = ({
         />
 
         {/* Floating Navbar Card (Solid White, No Blur Back) */}
-        <div className="relative pointer-events-auto w-full max-w-[1460px] mx-auto rounded-[20px] sm:rounded-[24px] bg-white border border-[#eedfe8] shadow-[0_4px_25px_rgba(0,0,0,0.06),0_1px_3px_rgba(0,0,0,0.02)] px-4 sm:px-6 py-2 transition-all">
+        <div className="relative pointer-events-auto w-full max-w-[1540px] 2xl:max-w-[1600px] mx-auto rounded-[20px] sm:rounded-[24px] bg-white border border-[#eedfe8] shadow-[0_4px_25px_rgba(0,0,0,0.06),0_1px_3px_rgba(0,0,0,0.02)] px-3 sm:px-4 lg:px-5 2xl:px-6 py-2 transition-all">
           <div className="relative flex items-center justify-between gap-2.5 sm:gap-3 xl:gap-5">
 
             {/* Left Block: Brand Logo */}
@@ -1769,11 +1769,11 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Row 2: Desktop Horizontal Category Navigation */}
           <nav
             ref={desktopNavRef}
-            className="hidden lg:flex items-center justify-between border-t border-[#f4ebf0] mt-1.5 pt-1.5 px-0.5 relative min-w-0 max-w-full"
+            className="hidden lg:flex items-center justify-between border-t border-[#f4ebf0] mt-1.5 pt-1.5 px-0.5 relative min-w-0 max-w-full gap-1"
             aria-label="Main Category Navigation"
           >
             {/* Left: Product Categories Cluster */}
-            <div className="flex items-center gap-0.5 min-[1120px]:gap-0.5 min-[1220px]:gap-1 xl:gap-1.5 2xl:gap-2.5 flex-nowrap min-w-0 py-0.5 overflow-x-auto scrollbar-none">
+            <div className="flex items-center gap-0.5 min-[1200px]:gap-0.5 min-[1280px]:gap-1 xl:gap-1.5 2xl:gap-2 flex-nowrap min-w-0 py-0.5 overflow-x-auto scrollbar-none">
               {/* Home Pill */}
               <a
                 href="/"
@@ -1785,7 +1785,7 @@ export const Header: React.FC<HeaderProps> = ({
                     if (homeCat) handleCategoryClick(homeCat);
                   }
                 }}
-                className="flex items-center gap-1 xl:gap-1.5 px-1.5 min-[1180px]:px-2 xl:px-2.5 2xl:px-3 py-0.5 min-[1180px]:py-1 rounded-full bg-[#FDECEF] hover:bg-[#fcdde3] text-[#D30915] text-[11px] min-[1180px]:text-[12px] xl:text-[13px] 2xl:text-[13.5px] font-bold transition-all cursor-pointer whitespace-nowrap select-none shrink-0 active:scale-95"
+                className="flex items-center gap-1 xl:gap-1.5 px-1.5 min-[1200px]:px-2 xl:px-2.5 py-0.5 rounded-full bg-[#FDECEF] hover:bg-[#fcdde3] text-[#D30915] text-[11px] min-[1200px]:text-[11.5px] min-[1360px]:text-[12px] 2xl:text-[13px] font-bold transition-all cursor-pointer whitespace-nowrap select-none shrink-0 active:scale-95"
               >
                 <HomeIcon className="w-3.5 h-3.5 text-[#D30915] shrink-0" />
                 <span>Home</span>
@@ -1824,43 +1824,40 @@ export const Header: React.FC<HeaderProps> = ({
                           handleCategoryClick(cat);
                         }
                       }}
-                      className={`group flex items-center gap-0.5 min-[1180px]:gap-1 px-1 min-[1180px]:px-1.5 xl:px-2 py-0.5 rounded-full text-[11px] min-[1150px]:text-[11.5px] min-[1220px]:text-[12px] xl:text-[13px] 2xl:text-[13.5px] font-bold transition-all cursor-pointer whitespace-nowrap select-none shrink-0 ${isMegaActive
+                      className={`group flex items-center gap-0.5 min-[1260px]:gap-1 px-1 min-[1200px]:px-1.5 xl:px-2 py-0.5 rounded-full text-[11px] min-[1200px]:text-[11.5px] min-[1360px]:text-[12px] 2xl:text-[13px] font-bold transition-all cursor-pointer whitespace-nowrap select-none shrink-0 ${isMegaActive
                         ? 'text-[#D30915] bg-[#fff0f3]'
                         : 'text-[#141219] hover:text-[#D30915] hover:bg-[#fff9fb]'
                         }`}
                       aria-expanded={isMegaActive}
                     >
-                      {cat.slug === 'candles' ? (
+                      {cat.slug === 'wax-melts' ? (
                         <>
                           <span className="hidden min-[1180px]:inline">{cat.name}</span>
-                          <span className="min-[1180px]:hidden">Candles</span>
+                          <span className="min-[1180px]:hidden">Melts</span>
                         </>
                       ) : cat.slug === 'bath-bombs' ? (
                         <>
-                          <span className="hidden min-[1280px]:inline">{cat.name}</span>
-                          <span className="min-[1280px]:hidden">Bath Bombs</span>
-                        </>
-                      ) : cat.slug === 'wax-melts' ? (
-                        <>
-                          <span className="hidden min-[1340px]:inline">{cat.name}</span>
-                          <span className="min-[1340px]:hidden">Melts & Treats</span>
-                        </>
-                      ) : cat.slug === 'mystery-boxes' ? (
-                        <>
-                          <span className="hidden min-[1220px]:inline">{cat.name}</span>
-                          <span className="min-[1220px]:hidden">Mystery</span>
+                          <span className="hidden min-[1240px]:inline">{cat.name}</span>
+                          <span className="min-[1240px]:hidden">Bath</span>
                         </>
                       ) : (
                         <span>{cat.name}</span>
                       )}
                       {cat.badge && (
-                        <span className="hidden min-[1380px]:inline-block text-[8.5px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[#FF3366] text-white ml-0.5">
-                          {cat.badge}
-                        </span>
+                        <>
+                          {/* Full badge on wide monitors (>= 1540px) */}
+                          <span className="hidden min-[1540px]:inline-block text-[8px] xl:text-[8.5px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[#FF3366] text-white ml-0.5 shrink-0 shadow-2xs">
+                            {cat.badge}
+                          </span>
+                          {/* Compact micro badge on standard/medium laptops (1220px - 1539px) */}
+                          <span className="hidden min-[1220px]:inline-block min-[1540px]:hidden text-[7.5px] font-black uppercase tracking-tight px-1 py-0.2 rounded-full bg-[#FF3366] text-white ml-0.5 shrink-0">
+                            {cat.slug === 'candles' ? 'HOT' : 'GEMS'}
+                          </span>
+                        </>
                       )}
                       {hasSub && cat.id !== 'jewelry' && (
                         <ChevronDown
-                          className={`w-3.5 h-3.5 text-[#716d77] transition-transform duration-200 group-hover:text-[#D30915] ${isMegaActive ? 'rotate-180 text-[#D30915]' : ''
+                          className={`w-3 h-3 min-[1360px]:w-3.5 min-[1360px]:h-3.5 text-[#716d77] transition-transform duration-200 group-hover:text-[#D30915] shrink-0 ${isMegaActive ? 'rotate-180 text-[#D30915]' : ''
                             }`}
                         />
                       )}
@@ -1871,7 +1868,7 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
 
             {/* Right: Utility Links Cluster (Divider + Affiliate Program + Appraise Jewelry) */}
-            <div className="flex items-center gap-0.5 min-[1180px]:gap-1 xl:gap-1.5 2xl:gap-2 shrink-0 ml-1 pl-1 min-[1180px]:ml-1.5 min-[1180px]:pl-1.5 xl:ml-2.5 xl:pl-2.5 border-l border-[#e2d5de]">
+            <div className="flex items-center gap-0.5 min-[1220px]:gap-1 xl:gap-1.5 2xl:gap-2 shrink-0 ml-1 pl-1 min-[1220px]:ml-1.5 min-[1220px]:pl-1.5 xl:ml-2 xl:pl-2 border-l border-[#e2d5de]">
               {NAVIGATION_CATEGORIES.filter(
                 (c) =>
                   !c.hideInDesktopNav &&
@@ -1892,7 +1889,7 @@ export const Header: React.FC<HeaderProps> = ({
                         handleCategoryClick(cat);
                       }
                     }}
-                    className={`flex items-center gap-0.5 min-[1180px]:gap-1 xl:gap-1.5 px-1 min-[1180px]:px-1.5 xl:px-2 py-0.5 rounded-full text-[11px] min-[1150px]:text-[11.5px] min-[1220px]:text-[12px] xl:text-[13px] 2xl:text-[13.5px] font-bold transition-all cursor-pointer whitespace-nowrap select-none shrink-0 ${isRouteActive
+                    className={`flex items-center gap-0.5 min-[1220px]:gap-1 xl:gap-1.5 px-1 min-[1200px]:px-1.5 xl:px-2 py-0.5 rounded-full text-[11px] min-[1200px]:text-[11.5px] min-[1360px]:text-[12px] 2xl:text-[13px] font-bold transition-all cursor-pointer whitespace-nowrap select-none shrink-0 ${isRouteActive
                       ? 'text-[#D30915] bg-[#fff0f3]'
                       : 'text-[#141219] hover:text-[#D30915] hover:bg-[#fff9fb]'
                       }`}
@@ -1912,24 +1909,25 @@ export const Header: React.FC<HeaderProps> = ({
                     {cat.slug === 'affiliate' ? (
                       isConsultantSubscribed ? (
                         <>
-                          <span className="hidden min-[1260px]:inline">Representative Dashboard</span>
-                          <span className="min-[1260px]:hidden">Rep Dashboard</span>
+                          <span className="hidden min-[1440px]:inline">Rep Dashboard</span>
+                          <span className="min-[1440px]:hidden">Rep Portal</span>
                         </>
                       ) : isConsultantPending ? (
                         <>
-                          <span className="hidden min-[1260px]:inline text-amber-700">Approval Pending</span>
-                          <span className="min-[1260px]:hidden text-amber-700">Pending</span>
+                          <span className="hidden min-[1440px]:inline text-amber-700">Approval Pending</span>
+                          <span className="min-[1440px]:hidden text-amber-700">Pending</span>
                         </>
                       ) : (
                         <>
-                          <span className="hidden min-[1260px]:inline">Become a Representative</span>
-                          <span className="min-[1260px]:hidden">Become a Rep</span>
+                          <span className="hidden min-[1540px]:inline">Become a Representative</span>
+                          <span className="hidden min-[1220px]:inline min-[1540px]:hidden">Become a Rep</span>
+                          <span className="min-[1220px]:hidden">Rep</span>
                         </>
                       )
                     ) : (cat.slug === 'appraise-your-jewelry' || cat.id === 'appraisal') ? (
                       <>
-                        <span className="hidden min-[1260px]:inline">{cat.name}</span>
-                        <span className="min-[1260px]:hidden">Appraise</span>
+                        <span className="hidden min-[1540px]:inline">{cat.name}</span>
+                        <span className="min-[1540px]:hidden">Appraise</span>
                       </>
                     ) : (
                       <span>{cat.name}</span>
