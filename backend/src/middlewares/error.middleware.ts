@@ -3,6 +3,7 @@ import { Request, Response, NextFunction } from 'express';
 export const notFoundHandler = (req: Request, res: Response, _next: NextFunction) => {
   res.status(404).json({
     status: 'error',
+    success: false,
     error: 'Not Found',
     message: `Cannot ${req.method} ${req.originalUrl}`,
   });
@@ -21,6 +22,7 @@ export const errorHandler = (
 
   res.status(statusCode).json({
     status: 'error',
+    success: false,
     error: err.name || 'Error',
     message,
     ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),

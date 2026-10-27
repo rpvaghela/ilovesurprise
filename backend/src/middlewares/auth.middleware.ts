@@ -13,6 +13,7 @@ export const authenticate = async (
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       res.status(401).json({
         status: 'error',
+        success: false,
         message: 'Authentication token missing or invalid',
       });
       return;
@@ -24,6 +25,7 @@ export const authenticate = async (
     if (!payload || !payload.id || payload.purpose) {
       res.status(401).json({
         status: 'error',
+        success: false,
         message: 'Invalid or expired token',
       });
       return;
@@ -37,6 +39,7 @@ export const authenticate = async (
     if (!user || !user.isActive) {
       res.status(401).json({
         status: 'error',
+        success: false,
         message: 'User account not found or deactivated',
       });
       return;

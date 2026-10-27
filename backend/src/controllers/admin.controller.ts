@@ -151,8 +151,15 @@ export const createProduct = async (
     const product = await productService.createProduct(req.body);
     res.status(201).json({
       status: 'success',
+      success: true,
       message: 'Product created successfully',
-      data: { product },
+      data: {
+        id: product.id,
+        name: product.name,
+        price: product.price,
+        slug: product.slug,
+        product,
+      },
     });
   } catch (error) {
     next(error);
@@ -169,8 +176,15 @@ export const updateProduct = async (
     const product = await productService.updateProduct(id, req.body);
     res.status(200).json({
       status: 'success',
+      success: true,
       message: 'Product updated successfully',
-      data: { product },
+      data: {
+        id: product.id,
+        name: product.name,
+        price: product.price,
+        slug: product.slug,
+        product,
+      },
     });
   } catch (error) {
     next(error);
